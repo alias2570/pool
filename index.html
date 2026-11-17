@@ -1,0 +1,918 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Pool</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b130f;overflow:hidden;touch-action:none;overscroll-behavior:none;
+    -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
+  #game{width:100vw;height:100vh}
+  canvas{display:block}
+  /* the table is landscape: ask for a rotation when the phone is held upright */
+  #rotate{display:none;position:fixed;inset:0;z-index:10;background:#0b130f;color:#cfe8d6;font:20px/1.8 Arial,sans-serif;
+    flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:24px}
+  #rotate b{font-size:46px;display:block}
+  @media (orientation:portrait){#rotate{display:flex}}
+</style>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="phaser.min.js"></script>
+</head>
+<body>
+<div id="game"></div>
+<div id="rotate"><b>&#128241;&#8635;</b>Please rotate your phone<br>لطفاً گوشی را افقی کنید</div>
+<script>
+/* =====================================================================
+   PART 1 - Pure physics (NO Phaser inside).
+   Later this exact class can run on the Node.js server for anti-cheat.
+   ===================================================================== */
+const W = 1280, H = 720;
+const L = 140, T = 110, R = 1140, B = 610;      // cushion surface (play area)
+const CX = (L + R) / 2, CY = (T + B) / 2;
+const BR = 14;                                   // ball radius
+/* ---- Pocket settings (edit freely) ----
+   r      = capture radius = how wide the pocket "mouth" is (bigger = easier)
+   inset  = how far the pocket centre sits outside the cushion corner (bigger = deeper in the rail) */
+const CORNER_R = 34, SIDE_R = 32, CORNER_INSET = 8, SIDE_INSET = 12;
+const POCKETS = [
+  { x: L - CORNER_INSET, y: T - CORNER_INSET, r: CORNER_R }, { x: R + CORNER_INSET, y: T - CORNER_INSET, r: CORNER_R },
+  { x: L - CORNER_INSET, y: B + CORNER_INSET, r: CORNER_R }, { x: R + CORNER_INSET, y: B + CORNER_INSET, r: CORNER_R },
+  { x: CX, y: T - SIDE_INSET, r: SIDE_R },                   { x: CX, y: B + SIDE_INSET, r: SIDE_R }
+];
+/* ---- Pocket jaws (the rounded "knuckle" at each side of a pocket mouth) ----
+   MOUTH_C / MOUTH_S = clear opening between the two knuckles, in pixels (ball diameter = 28)
+     ~1.5x ball = hard/pro, ~1.8x = realistic, ~2.2x = easy.
+   JAW_R  = knuckle radius.   E_JAW = bounciness of a knuckle hit. */
+const JAW_R = 6, MOUTH_C = 54, MOUTH_S = 50, E_JAW = 0.6;
+const JC = (MOUTH_C + 2 * JAW_R) / Math.SQRT2 - JAW_R;   // corner knuckle distance from the corner, along the rail
+const JS = MOUTH_S / 2 + JAW_R;                          // side knuckle distance from the table centre
+// each knuckle is tangent to the cushion line, so a ball sliding along the rail passes it with no bump
+const JAWS = [
+  { x: L + JC, y: T - JAW_R }, { x: L - JAW_R, y: T + JC },
+  { x: R - JC, y: T - JAW_R }, { x: R + JAW_R, y: T + JC },
+  { x: L + JC, y: B + JAW_R }, { x: L - JAW_R, y: B - JC },
+  { x: R - JC, y: B + JAW_R }, { x: R + JAW_R, y: B - JC },
+  { x: CX - JS, y: T - JAW_R }, { x: CX + JS, y: T - JAW_R },
+  { x: CX - JS, y: B + JAW_R }, { x: CX + JS, y: B + JAW_R }
+];
+// cushion exists only between the knuckles; inside a mouth there is no wall
+const onRailX = x => (x >= L + JC && x <= CX - JS) || (x >= CX + JS && x <= R - JC);
+const onRailY = y => y >= T + JC && y <= B - JC;
+
+/* ---- Physics feel ----
+   Rolling friction is now 3-zone so the ball dies out smoothly (like the real game):
+     fast (speed > SLOW): constant FRIC + speed-proportional DRAG  -> quick loss of energy right after the hit
+     slow (speed <= SLOW): exponential decay (SLOWK per second) + a tiny constant TAILF -> long, soft glide to zero
+   Tuning:
+     ball dies too early at the end      -> lower SLOWK (e.g. 1.0) and/or lower TAILF (e.g. 2)
+     ball glides too long at the end     -> raise SLOWK (e.g. 2.5) and/or raise TAILF
+     too many cushion hits after a break -> raise DRAG (fast zone)
+     total distance changed              -> adjust FRIC and DRAG together
+   STOP = speed (px/s) below which the ball is set to exactly 0. */
+const FRIC = 120, DRAG = 0.35, SLOW = 70, SLOWK = 1.4, TAILF = 2, STOP = 0.5;
+const E_BALL = 0.97, E_WALL = 0.85, MAXV = 2600;
+const STEP = 1 / 240;
+const RACK_GAP = 1.0, RACK_JITTER = 0.3;   // px: فاصله‌ی بین توپ‌ها و دامنه‌ی نویز
+/* ---- Spin feel ----
+   SLIDE      sliding friction while the cue ball skids (bigger = draw / follow "bite" sooner)
+   SPIN_K     strength of top / back spin at the edge of the spin dial
+   SIDE_K     strength of side English
+   WALL_MU    how much the cushion grips side spin
+   SPIN_DECAY side spin fades by this fraction per second */
+const SLIDE = 700, SPIN_K = 1.4, SIDE_K = 1.0, WALL_MU = 0.2, SPIN_DECAY = 0.4;
+
+class Sim {
+  constructor() { this.balls = []; this.events = []; this.reset(); }
+
+  reset() {
+    this.events = [];
+    // rvx/rvy = "roll velocity" of the cue ball surface (equal to v when rolling, different when skidding); w = side spin
+    this.balls = [{ n: 0, x: L + 250, y: CY, vx: 0, vy: 0, rvx: 0, rvy: 0, w: 0, active: true, rot: 0 }];
+    const nums = [1,2,3,4,5,6,7,9,10,11,12,13,14,15];
+    for (let i = nums.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [nums[i], nums[j]] = [nums[j], nums[i]];
+    }
+    nums.splice(4, 0, 8);                        // 8-ball in the middle of the rack
+    const fx = L + (R - L) * 0.75;
+    let k = 0;
+    for (let row = 0; row < 5; row++) {
+      for (let col = 0; col <= row; col++) {
+        const jx = (Math.random() - 0.5) * 2 * RACK_JITTER, jy = (Math.random() - 0.5) * 2 * RACK_JITTER;
+this.balls.push({
+  n: nums[k++],
+  x: fx + row * (BR * Math.sqrt(3) + RACK_GAP) + jx,
+  y: CY + (col - row / 2) * (2 * BR + RACK_GAP) + jy,
+  vx: 0, vy: 0, active: true, rot: 0
+});
+      }
+    }
+  }
+
+  isMoving() {
+    return this.balls.some(b => b.active && (b.vx !== 0 || b.vy !== 0 ||
+      (b.n === 0 && Math.abs(b.vx - b.rvx) + Math.abs(b.vy - b.rvy) > 8)));
+  }
+
+  // top: +1 = follow (top of the ball), -1 = draw (bottom).  side: +1 = right English, -1 = left (as seen along the aim)
+  shoot(angle, power, top = 0, side = 0) {
+    const c = this.balls[0], sp = power * MAXV;
+    const dx = Math.cos(angle), dy = Math.sin(angle);
+    c.vx = dx * sp; c.vy = dy * sp;
+    const f = SPIN_K * top;                     // centre hit => rv = 0 => the ball skids first (stun), like real pool
+    c.rvx = c.vx * f; c.rvy = c.vy * f;
+    c.w = -side * SIDE_K * sp;
+  }
+
+  // cushion bounce; (nx,ny) = unit normal pointing into the table
+  bounce(b, nx, ny, e) {
+    const vn = b.vx * nx + b.vy * ny;
+    if (vn >= 0) return;
+    const tx = -ny, ty = nx, vnn = -vn;
+    b.vx -= (1 + e) * vn * nx; b.vy -= (1 + e) * vn * ny;
+    if (b.n === 0) {
+      const rn = b.rvx * nx + b.rvy * ny;       // same bounce for the roll vector keeps "rolling stays rolling"
+      b.rvx -= (1 + e) * rn * nx; b.rvy -= (1 + e) * rn * ny;
+      if (e === E_WALL) {                       // side English: cushion friction trades spin for sideways speed
+        const slip = (b.vx * tx + b.vy * ty) - b.w;
+        const cap = WALL_MU * (1 + e) * vnn;
+        const dvt = -Math.max(-cap, Math.min(cap, slip / 3.5));
+        b.vx += dvt * tx; b.vy += dvt * ty;
+        b.w -= 2.5 * dvt;
+      }
+    }
+    this.events.push({ type: 'wall', v: vnn, n: b.n });
+  }
+
+  step(dt) {
+    const bs = this.balls;
+    for (const b of bs) {
+      if (!b.active) continue;
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      let sliding = false;
+      if (b.n === 0) {
+        b.w *= 1 - SPIN_DECAY * dt;
+        const ux = b.vx - b.rvx, uy = b.vy - b.rvy, um = Math.hypot(ux, uy);
+        if (um > 8) {                           // skidding on the cloth: friction pulls v and roll together
+          sliding = true;
+          const ex = ux / um, ey = uy / um, dum = 3.5 * SLIDE * dt, k = um < dum ? um / dum : 1;
+          b.vx -= ex * SLIDE * dt * k; b.vy -= ey * SLIDE * dt * k;
+          b.rvx += ex * 2.5 * SLIDE * dt * k; b.rvy += ey * 2.5 * SLIDE * dt * k;
+          if (k < 1) { b.rvx = b.vx; b.rvy = b.vy; }
+        } else { b.rvx = b.vx; b.rvy = b.vy; }
+      }
+      const s = Math.hypot(b.vx, b.vy);
+      if (s > 0) {
+        if (!sliding) {
+          // 3-zone rolling friction: fast = FRIC + DRAG*speed, slow = exponential glide + tiny constant tail
+          let ns;
+          if (s > SLOW) ns = s - (FRIC + DRAG * s) * dt;
+          else ns = s * (1 - SLOWK * dt) - TAILF * dt;
+          if (ns < STOP) { b.vx = 0; b.vy = 0; if (b.n === 0) { b.rvx = 0; b.rvy = 0; } }
+          else { const k = ns / s; b.vx *= k; b.vy *= k; if (b.n === 0) { b.rvx = b.vx; b.rvy = b.vy; } }
+        }
+        b.rot += (b.vx * 0.8 + b.vy * 0.6) * dt / BR * 0.5;
+      }
+    }
+    // pockets: inside the capture circle, or centre already past the cushion line (only possible through a mouth)
+    for (const b of bs) {
+      if (!b.active) continue;
+      let hit = null, near = null, bestD = 1e9;
+      for (const p of POCKETS) {
+        const d = Math.hypot(b.x - p.x, b.y - p.y);
+        if (d < p.r) { hit = p; break; }
+        if (d < bestD) { bestD = d; near = p; }
+      }
+      if (!hit && (b.x < L || b.x > R || b.y < T || b.y > B)) hit = near;
+      if (hit) {
+        b.active = false; b.vx = 0; b.vy = 0;
+        if (b.n === 0) { b.rvx = 0; b.rvy = 0; b.w = 0; }
+        this.events.push({ type: 'pocket', ball: b, pocket: hit, n: b.n });
+      }
+    }
+    // cushions (only between the jaws)
+    for (const b of bs) {
+      if (!b.active) continue;
+      if (onRailY(b.y)) {
+        if (b.x < L + BR) { b.x = L + BR; this.bounce(b, 1, 0, E_WALL); }
+        if (b.x > R - BR) { b.x = R - BR; this.bounce(b, -1, 0, E_WALL); }
+      }
+      if (onRailX(b.x)) {
+        if (b.y < T + BR) { b.y = T + BR; this.bounce(b, 0, 1, E_WALL); }
+        if (b.y > B - BR) { b.y = B - BR; this.bounce(b, 0, -1, E_WALL); }
+      }
+    }
+    // jaws: fixed round knuckles at both sides of every pocket mouth
+    for (const b of bs) {
+      if (!b.active) continue;
+      for (const j of JAWS) {
+        const dx = b.x - j.x, dy = b.y - j.y, min = BR + JAW_R, d2 = dx * dx + dy * dy;
+        if (d2 >= min * min || d2 === 0) continue;
+        const d = Math.sqrt(d2), nx = dx / d, ny = dy / d;
+        b.x = j.x + nx * min; b.y = j.y + ny * min;
+        this.bounce(b, nx, ny, E_JAW);
+      }
+    }
+    // ball vs ball (equal mass)
+    for (let i = 0; i < bs.length; i++) {
+      const a = bs[i]; if (!a.active) continue;
+      for (let j = i + 1; j < bs.length; j++) {
+        const c = bs[j]; if (!c.active) continue;
+        const dx = c.x - a.x, dy = c.y - a.y;
+        const d2 = dx * dx + dy * dy, min = 2 * BR;
+        if (d2 >= min * min || d2 === 0) continue;
+        const d = Math.sqrt(d2), nx = dx / d, ny = dy / d;
+        const ov = (min - d) / 2;
+        a.x -= nx * ov; a.y -= ny * ov; c.x += nx * ov; c.y += ny * ov;
+        const vn = (a.vx - c.vx) * nx + (a.vy - c.vy) * ny;
+        if (vn > 0) {
+          const j2 = (1 + E_BALL) / 2 * vn;
+          a.vx -= j2 * nx; a.vy -= j2 * ny; c.vx += j2 * nx; c.vy += j2 * ny;
+          this.events.push({ type: 'ball', v: vn, a: a.n, b: c.n });
+        }
+      }
+    }
+  }
+
+  // first thing the cue ball would touch along a direction (for the aim guide)
+  rayHit(dx, dy) {
+    const c = this.balls[0];
+    let best = { t: 1e9, kind: 'none', ball: null };
+    // a wall only counts if the hit point lies on the cushion (not inside a pocket mouth)
+    const tryWall = (t, vertical) => {
+      if (t < 0 || t >= best.t) return;
+      const hx = c.x + dx * t, hy = c.y + dy * t;
+      if (vertical ? onRailY(hy) : onRailX(hx)) best = { t, kind: 'wall', ball: null };
+    };
+    if (dx > 1e-9) tryWall((R - BR - c.x) / dx, true);
+    if (dx < -1e-9) tryWall((L + BR - c.x) / dx, true);
+    if (dy > 1e-9) tryWall((B - BR - c.y) / dy, false);
+    if (dy < -1e-9) tryWall((T + BR - c.y) / dy, false);
+    for (const j of JAWS) {
+      const fx = j.x - c.x, fy = j.y - c.y, bb = fx * dx + fy * dy;
+      if (bb <= 0) continue;
+      const disc = bb * bb - (fx * fx + fy * fy - (BR + JAW_R) * (BR + JAW_R));
+      if (disc < 0) continue;
+      const t = bb - Math.sqrt(disc);
+      if (t >= 0 && t < best.t) best = { t, kind: 'jaw', ball: null };
+    }
+    for (let i = 1; i < this.balls.length; i++) {
+      const b = this.balls[i]; if (!b.active) continue;
+      const fx = b.x - c.x, fy = b.y - c.y;
+      const bb = fx * dx + fy * dy; if (bb <= 0) continue;
+      const cc = fx * fx + fy * fy - 4 * BR * BR;
+      const disc = bb * bb - cc; if (disc < 0) continue;
+      const t = bb - Math.sqrt(disc);
+      if (t >= 0 && t < best.t) best = { t, kind: 'ball', ball: b };
+    }
+    if (best.kind === 'none') {                      // ray goes through a pocket mouth: stop the guide at the pocket
+      for (const p of POCKETS) {
+        const fx = p.x - c.x, fy = p.y - c.y, bb = fx * dx + fy * dy;
+        if (bb > 0 && fx * fx + fy * fy - bb * bb < p.r * p.r && bb < best.t) best.t = bb;
+      }
+    }
+    if (best.t > 1500) best.t = 1500;
+    best.x = c.x + dx * best.t; best.y = c.y + dy * best.t;
+    return best;
+  }
+}
+
+/* =====================================================================
+   PART 1b - 8-ball rules (pure logic, no Phaser).  Also meant to run on the server.
+   A shot is judged from a log of what happened: [{type:'ball',a,b} | {type:'wall',n} | {type:'pocket',n}]
+   `before` = Set of object-ball numbers that were on the table when the shot started.
+   ===================================================================== */
+class Rules {
+  constructor() { this.reset(); }
+
+  reset() {
+    this.turn = 0;                 // who shoots next (0 or 1)
+    this.groups = [null, null];    // 'solid' | 'stripe' once assigned; null = table is open
+    this.breakShot = true;         // the next shot is the break
+    this.ballInHand = true;        // break: cue ball placed behind the head string
+    this.winner = -1;
+  }
+
+  rerack() { this.groups = [null, null]; this.breakShot = true; this.ballInHand = true; }   // same player breaks again
+
+  static groupOf(n) { return n === 8 ? 'eight' : (n < 8 ? 'solid' : 'stripe'); }
+
+  // what the shooter must hit first: 'any' (open table) | 'solid' | 'stripe' | 'eight'
+  target(player, before) {
+    const g = this.groups[player];
+    if (!g) return 'any';
+    for (const n of before) if (Rules.groupOf(n) === g) return g;
+    return 'eight';
+  }
+
+  evaluate(log, before) {
+    const me = this.turn, opp = 1 - me;
+    const res = { foul: false, reason: '', continues: false, winner: -1, rerack: false, assigned: false, potted: [], scratch: false };
+    let first = null, railAfterContact = false;
+    const railBalls = new Set();
+    for (const e of log) {
+      if (e.type === 'ball') { if (first === null && (e.a === 0 || e.b === 0)) first = e.a === 0 ? e.b : e.a; }
+      else if (e.type === 'wall') { if (e.n !== 0) railBalls.add(e.n); if (first !== null) railAfterContact = true; }
+      else if (e.type === 'pocket') { if (e.n === 0) res.scratch = true; else res.potted.push(e.n); }
+    }
+    const potted = res.potted;
+    const foul = why => { if (!res.foul) { res.foul = true; res.reason = why; } };
+
+    if (this.breakShot && potted.includes(8)) { res.rerack = true; res.reason = '8-ball pocketed on the break: re-rack'; return res; }
+
+    const target = this.breakShot ? 'any' : this.target(me, before);
+    if (res.scratch) foul('cue ball pocketed');
+    else if (first === null) foul('no ball was hit');
+    else if (!this.breakShot) {
+      const g = Rules.groupOf(first);
+      if (target === 'any' ? g === 'eight' : g !== target) foul(target === 'eight' ? 'must hit the 8-ball first' : 'wrong ball hit first');
+    }
+    if (!res.foul && this.breakShot && potted.length === 0 && railBalls.size < 4) foul('illegal break (4 balls must reach a rail)');
+    if (!res.foul && !this.breakShot && potted.length === 0 && !railAfterContact) foul('no ball reached a rail');
+
+    if (potted.includes(8)) {          // game decided
+      res.winner = (res.foul || target !== 'eight') ? opp : me;
+      if (res.winner === opp) res.reason = res.foul ? res.reason : '8-ball pocketed too early';
+      this.winner = res.winner; return res;
+    }
+
+    if (!res.foul && !this.breakShot && this.groups[me] === null) {      // open table: first pocketed ball picks the group
+      const f = potted.find(n => n !== 8);
+      if (f !== undefined) {
+        const g = Rules.groupOf(f);
+        this.groups[me] = g; this.groups[opp] = g === 'solid' ? 'stripe' : 'solid'; res.assigned = true;
+      }
+    }
+
+    if (res.foul) { this.turn = opp; this.ballInHand = true; }
+    else {
+      const mine = this.groups[me];
+      res.continues = this.breakShot ? potted.length > 0 : (mine !== null && potted.some(n => Rules.groupOf(n) === mine));
+      if (!res.continues) this.turn = opp;
+      this.ballInHand = false;
+    }
+    this.breakShot = false;
+    return res;
+  }
+}
+
+/* =====================================================================
+   PART 2 - Procedural art (zero image files => tiny download)
+   ===================================================================== */
+function rr(c, x, y, w, h, r) {
+  c.beginPath();
+  c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r);
+  c.arcTo(x + w, y + h, x, y + h, r); c.arcTo(x, y + h, x, y, r);
+  c.arcTo(x, y, x + w, y, r); c.closePath();
+}
+
+function buildTextures(scene) {
+  const tx = scene.textures, S = 96, m = S / 2;
+  const cols = [null, '#f5c518', '#1d4ed8', '#dc2626', '#7e22ce', '#f97316', '#15803d', '#7f1d1d', '#111111'];
+
+  for (let n = 0; n <= 15; n++) {
+    if (tx.exists('ball' + n)) continue;
+    const t = tx.createCanvas('ball' + n, S, S), c = t.getContext();
+    const col = n === 0 ? '#ffffff' : cols[n > 8 ? n - 8 : n];
+    c.save(); c.beginPath(); c.arc(m, m, m - 1, 0, Math.PI * 2); c.clip();
+    if (n > 8) {
+      c.fillStyle = '#f4f1e8'; c.fillRect(0, 0, S, S);
+      c.fillStyle = col; c.fillRect(0, S * 0.22, S, S * 0.56);
+    } else { c.fillStyle = col; c.fillRect(0, 0, S, S); }
+    c.restore();
+    if (n > 0) {
+      c.fillStyle = '#fff'; c.beginPath(); c.arc(m + S * 0.14, m, S * 0.19, 0, Math.PI * 2); c.fill();
+      c.fillStyle = '#111'; c.font = 'bold 26px Arial'; c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.fillText(String(n), m + S * 0.14, m + 1);
+    } else {
+      c.fillStyle = '#d33'; c.beginPath(); c.arc(m + S * 0.18, m, S * 0.05, 0, Math.PI * 2); c.fill();
+    }
+    t.refresh();
+  }
+
+  if (!tx.exists('shine')) {            // static light on top of the rolling ball
+    const t = tx.createCanvas('shine', S, S), c = t.getContext();
+    c.save(); c.beginPath(); c.arc(m, m, m - 1, 0, Math.PI * 2); c.clip();
+    let g = c.createRadialGradient(m - S * 0.08, m - S * 0.1, S * 0.15, m, m, m);
+    g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(0.65, 'rgba(0,0,0,0.05)'); g.addColorStop(1, 'rgba(0,0,0,0.6)');
+    c.fillStyle = g; c.fillRect(0, 0, S, S);
+    g = c.createRadialGradient(m - S * 0.2, m - S * 0.24, 0, m - S * 0.2, m - S * 0.24, S * 0.2);
+    g.addColorStop(0, 'rgba(255,255,255,0.95)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+    c.fillStyle = g; c.fillRect(0, 0, S, S);
+    c.restore(); t.refresh();
+  }
+
+  if (!tx.exists('shadow')) {
+    const t = tx.createCanvas('shadow', S, S), c = t.getContext();
+    const g = c.createRadialGradient(m, m, 0, m, m, m);
+    g.addColorStop(0, 'rgba(0,0,0,0.55)'); g.addColorStop(0.6, 'rgba(0,0,0,0.3)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+    c.fillStyle = g; c.fillRect(0, 0, S, S); t.refresh();
+  }
+
+  if (!tx.exists('table')) {
+    const t = tx.createCanvas('table', W, H), c = t.getContext();
+    c.fillStyle = '#0b130f'; c.fillRect(0, 0, W, H);
+    let g = c.createLinearGradient(0, T - 56, 0, B + 56);
+    g.addColorStop(0, '#7a4a24'); g.addColorStop(0.5, '#5a3318'); g.addColorStop(1, '#3f230f');
+    c.fillStyle = g; rr(c, L - 56, T - 56, R - L + 112, B - T + 112, 34); c.fill();
+    c.strokeStyle = 'rgba(255,220,170,0.25)'; c.lineWidth = 2;
+    rr(c, L - 54, T - 54, R - L + 108, B - T + 108, 32); c.stroke();
+    c.fillStyle = '#1d6b3b'; rr(c, L - 24, T - 24, R - L + 48, B - T + 48, 14); c.fill();
+    g = c.createRadialGradient(CX, CY, 60, CX, CY, 620);
+    g.addColorStop(0, '#2f9a57'); g.addColorStop(1, '#1b6639');
+    c.fillStyle = g; c.fillRect(L, T, R - L, B - T);
+    c.strokeStyle = 'rgba(255,255,255,0.12)'; c.lineWidth = 2;
+    c.beginPath(); c.moveTo(L + 250, T); c.lineTo(L + 250, B); c.stroke();
+    c.fillStyle = 'rgba(255,255,255,0.25)';
+    for (const sx of [L + 250, L + (R - L) * 0.75]) { c.beginPath(); c.arc(sx, CY, 3, 0, Math.PI * 2); c.fill(); }
+    for (const p of POCKETS) {
+      c.fillStyle = '#050505'; c.beginPath(); c.arc(p.x, p.y, p.r - 4, 0, Math.PI * 2); c.fill();
+      c.strokeStyle = '#2b1a0c'; c.lineWidth = 5; c.stroke();
+    }
+    for (const j of JAWS) {                              // rubber knuckles at the pocket mouths
+      c.fillStyle = '#14502c'; c.beginPath(); c.arc(j.x, j.y, JAW_R, 0, Math.PI * 2); c.fill();
+      c.strokeStyle = 'rgba(255,255,255,0.22)'; c.lineWidth = 1.5; c.stroke();
+    }
+    c.fillStyle = '#e8dcc0';
+    const dia = (x, y) => { c.beginPath(); c.moveTo(x, y - 5); c.lineTo(x + 5, y); c.lineTo(x, y + 5); c.lineTo(x - 5, y); c.closePath(); c.fill(); };
+    for (let i = 1; i < 8; i++) { if (i === 4) continue; const x = L + (R - L) * i / 8; dia(x, T - 40); dia(x, B + 40); }
+    for (let i = 1; i < 4; i++) { const y = T + (B - T) * i / 4; dia(L - 40, y); dia(R + 40, y); }
+    t.refresh();
+  }
+}
+
+/* =====================================================================
+   PART 2b - Rolling balls: every ball is a real 3D sphere with its own orientation.
+   The number / stripe is wrapped on a sphere (equirectangular source) and re-rendered each frame
+   from the ball's rotation matrix, so it really ROLLS (and the cue ball visibly skids, follows, draws).
+   Coordinates: x right, y down, z into the screen (visible side is z < 0).
+   ===================================================================== */
+const EQW = 256, EQH = 128, RS = 56;               // source map size, rendered ball size (px)
+const BALL_COLS = [null, '#f5c518', '#1d4ed8', '#dc2626', '#7e22ce', '#f97316', '#15803d', '#7f1d1d', '#111111'];
+
+function buildEquirect(n) {
+  const cv = document.createElement('canvas'); cv.width = EQW; cv.height = EQH;
+  const c = cv.getContext('2d');
+  const col = n === 0 ? '#ffffff' : BALL_COLS[n > 8 ? n - 8 : n];
+  if (n > 8) {
+    c.fillStyle = '#f4f1e8'; c.fillRect(0, 0, EQW, EQH);
+    c.fillStyle = col; c.fillRect(0, EQH * 0.31, EQW, EQH * 0.38);
+  } else { c.fillStyle = col; c.fillRect(0, 0, EQW, EQH); }
+  for (const x of [EQW / 2, 0, EQW]) {              // number discs on opposite sides (x = 0 and EQW are the same meridian)
+    if (n > 0) {
+      c.fillStyle = '#fff'; c.beginPath(); c.arc(x, EQH / 2, 17, 0, Math.PI * 2); c.fill();
+      c.fillStyle = '#111'; c.font = 'bold 22px Arial'; c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.fillText(String(n), x, EQH / 2 + 1);
+    } else {
+      c.fillStyle = '#d33'; c.beginPath(); c.arc(x, EQH / 2, 4, 0, Math.PI * 2); c.fill();
+    }
+  }
+  return c.getImageData(0, 0, EQW, EQH);
+}
+
+const MAT_I = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+function matMul(A, B) {
+  const C = new Array(9).fill(0);
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) for (let k = 0; k < 3; k++) C[i * 3 + j] += A[i * 3 + k] * B[k * 3 + j];
+  return C;
+}
+function rotInc(wx, wy, wz, dt) {                    // Rodrigues: rotation by |w|*dt around w
+  const m = Math.hypot(wx, wy, wz);
+  if (m < 1e-9) return MAT_I;
+  const th = m * dt, ax = wx / m, ay = wy / m, az = wz / m, c = Math.cos(th), s = Math.sin(th), t = 1 - c;
+  return [t * ax * ax + c, t * ax * ay - s * az, t * ax * az + s * ay,
+          t * ax * ay + s * az, t * ay * ay + c, t * ay * az - s * ax,
+          t * ax * az - s * ay, t * ay * az + s * ax, t * az * az + c];
+}
+function orthonormalize(M) {                         // stop numeric drift
+  let a = [M[0], M[1], M[2]], b = [M[3], M[4], M[5]];
+  const la = Math.hypot(...a); a = a.map(x => x / la);
+  const d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; b = [b[0] - d * a[0], b[1] - d * a[1], b[2] - d * a[2]];
+  const lb = Math.hypot(...b); b = b.map(x => x / lb);
+  const c = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  return [...a, ...b, ...c];
+}
+function renderSphere(out, eq, M) {                  // out: ImageData(RS,RS), eq: ImageData(EQW,EQH), M: body->world
+  const d = out.data, e = eq.data, h = RS / 2;
+  for (let py = 0; py < RS; py++) {
+    const v = (py + 0.5 - h) / h;
+    for (let px = 0; px < RS; px++) {
+      const u = (px + 0.5 - h) / h, r2 = u * u + v * v, i = (py * RS + px) * 4;
+      if (r2 >= 1) { d[i + 3] = 0; continue; }
+      const z = -Math.sqrt(1 - r2);
+      const qx = M[0] * u + M[3] * v + M[6] * z, qy = M[1] * u + M[4] * v + M[7] * z, qz = M[2] * u + M[5] * v + M[8] * z;
+      const lon = Math.atan2(qx, -qz), lat = Math.asin(qy < -1 ? -1 : qy > 1 ? 1 : qy);
+      let sx = ((lon / (2 * Math.PI) + 0.5) * EQW) | 0, sy = ((lat / Math.PI + 0.5) * EQH) | 0;
+      if (sx >= EQW) sx = EQW - 1; if (sy >= EQH) sy = EQH - 1;
+      const j = (sy * EQW + sx) * 4, a = (1 - Math.sqrt(r2)) * h;
+      d[i] = e[j]; d[i + 1] = e[j + 1]; d[i + 2] = e[j + 2]; d[i + 3] = a >= 1 ? 255 : a * 255;
+    }
+  }
+}
+
+/* =====================================================================
+   Telegram Mini App setup (safe to call outside Telegram: it does nothing)
+   ===================================================================== */
+function initTelegram() {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (!tg) return;
+  const ok = v => { try { return tg.isVersionAtLeast(v); } catch (e) { return false; } };
+  const safe = f => { try { f(); } catch (e) {} };
+  safe(() => tg.ready());
+  safe(() => tg.expand());
+  if (ok('7.7')) safe(() => tg.disableVerticalSwipes());          // dragging down must not close the app
+  if (ok('6.1')) { safe(() => tg.setHeaderColor('#0b130f')); safe(() => tg.setBackgroundColor('#0b130f')); }
+  // optional full screen for testing: open the app with ?fs=1 at the end of its link
+  if (ok('8.0') && /[?&]fs=1/.test(location.search)) safe(() => tg.requestFullscreen());
+}
+
+/* =====================================================================
+   PART 3 - Phaser scene: rendering, input, sound, turns
+   ===================================================================== */
+const SLIDER = { x: 1238, y0: 130, y1: 590 };
+const SPIN = { x: 1238, y: 656, r: 32 };          // cue-ball contact dial (tip position on the ball)
+const HEAD_X = L + 250;                           // head string (break placement limit)
+
+class Main extends Phaser.Scene {
+  create() {
+    buildTextures(this);
+    this.eq = []; this.rollCtx = []; this.rollOut = []; this.ori = [];
+    for (let n = 0; n <= 15; n++) {                // one rolling-sphere texture per ball number
+      this.eq[n] = buildEquirect(n);
+      const t = this.textures.createCanvas('roll' + n, RS, RS);
+      this.rollCtx[n] = t; this.rollOut[n] = t.getContext().createImageData(RS, RS);
+      this.ori[n] = MAT_I;
+    }
+    this.sim = new Sim();
+    this.rules = new Rules();
+    this.state = 'aim';                           // 'aim' | 'moving' | 'over'
+    this.acc = 0;
+    this.aimAngle = 0; this.power = 0; this.top = 0; this.side = 0;
+    this.aiming = false; this.sliding = false; this.spinning = false; this.dragCue = false;
+    this.shotLog = []; this.before = new Set();
+    this.potted = []; this.trayImgs = {};
+
+    this.add.image(0, 0, 'table').setOrigin(0).setDepth(0);
+
+    this.spr = this.sim.balls.map(b => ({
+      shadow: this.add.image(0, 0, 'shadow').setDepth(1).setDisplaySize(BR * 3.4, BR * 3.4),
+      ball: this.add.image(0, 0, 'roll' + b.n).setDepth(2).setDisplaySize(BR * 2, BR * 2),
+      shine: this.add.image(0, 0, 'shine').setDepth(3).setDisplaySize(BR * 2, BR * 2)
+    }));
+
+    this.g = this.add.graphics().setDepth(5);
+    this.ui = this.add.graphics().setDepth(10);
+
+    const f = { fontFamily: 'Arial', fontSize: '20px', color: '#cfe8d6' };
+    this.p1Text = this.add.text(84, 16, '', f).setDepth(10);
+    this.p2Text = this.add.text(430, 16, '', f).setDepth(10);
+    this.msg = this.add.text(CX, 706, '', { fontFamily: 'Arial', fontSize: '19px', color: '#ffd166' }).setOrigin(0.5).setDepth(10);
+    const lf = { fontFamily: 'Arial', fontSize: '13px', color: '#cfe8d6' };
+    this.add.text(SLIDER.x, SLIDER.y0 - 30, 'POWER', lf).setOrigin(0.5).setDepth(10);
+    this.add.text(SPIN.x, SPIN.y - SPIN.r - 14, 'SPIN', lf).setOrigin(0.5).setDepth(10);
+
+    const btn = this.add.text(1196, 18, 'RESET', { fontFamily: 'Arial', fontSize: '20px', color: '#fff', backgroundColor: '#2a6b45', padding: { x: 12, y: 6 } })
+      .setOrigin(1, 0).setDepth(10).setInteractive({ useHandCursor: true });
+    btn.on('pointerdown', () => this.startGame());
+
+    // debug overlay: knuckles (red), capture circles (yellow), cue-ball centre limits on the cushions (cyan)
+    this.showJaws = false;
+    this.dbg = this.add.graphics().setDepth(4);
+    const drawDbg = () => {
+      const d = this.dbg; d.clear();
+      if (!this.showJaws) return;
+      d.lineStyle(2, 0xff4d4d, 1); JAWS.forEach(j => d.strokeCircle(j.x, j.y, JAW_R));
+      d.lineStyle(1, 0xffe14d, 0.8); POCKETS.forEach(p => d.strokeCircle(p.x, p.y, p.r));
+      d.lineStyle(1, 0x4dd9ff, 0.8);
+      d.lineBetween(L + JC, T + BR, CX - JS, T + BR); d.lineBetween(CX + JS, T + BR, R - JC, T + BR);
+      d.lineBetween(L + JC, B - BR, CX - JS, B - BR); d.lineBetween(CX + JS, B - BR, R - JC, B - BR);
+      d.lineBetween(L + BR, T + JC, L + BR, B - JC); d.lineBetween(R - BR, T + JC, R - BR, B - JC);
+    };
+    drawDbg();
+    const jbtn = this.add.text(1090, 18, 'JAWS', { fontFamily: 'Arial', fontSize: '20px', color: '#fff', backgroundColor: '#6b2a2a', padding: { x: 12, y: 6 } })
+      .setOrigin(1, 0).setDepth(10).setInteractive({ useHandCursor: true });
+    const toggleJ = () => { this.showJaws = !this.showJaws; drawDbg(); };
+    jbtn.on('pointerdown', toggleJ);
+    if (this.input.keyboard) this.input.keyboard.on('keydown-J', toggleJ);
+
+    this.input.on('pointerdown', p => this.onDown(p));
+    this.input.on('pointermove', p => this.onMove(p));
+    this.input.on('pointerup', () => this.onUp());
+    this.input.on('pointerupoutside', () => this.onUp());
+
+    initTelegram();
+    this.startGame();
+  }
+
+  /* ---------- game flow ---------- */
+  startGame() {
+    this.rules.reset();
+    this.newRack();
+    this.msg.setText('Break: drag the cue ball behind the line if you like, then aim');
+  }
+
+  newRack() {                                     // fresh sprites + balls (also used for a re-rack)
+    this.sim.reset();
+    this.spr.forEach(s => this.tweens.killTweensOf([s.ball, s.shine, s.shadow]));
+    this.sim.balls.forEach((b, i) => {
+      const s = this.spr[i];
+      s.ball.setTexture('roll' + b.n);
+      [s.ball, s.shine].forEach(o => o.setVisible(true).setDisplaySize(BR * 2, BR * 2));
+      s.shadow.setVisible(true).setDisplaySize(BR * 3.4, BR * 3.4);
+    });
+    for (let n = 0; n <= 15; n++) {                // random start orientation: number faces the player, slightly turned
+      this.ori[n] = rotInc(0, 0, Math.random() * Math.PI * 2, 1);
+      this.drawRoll(n);
+    }
+    Object.values(this.trayImgs).forEach(i => i.destroy());
+    this.trayImgs = {}; this.potted = [];
+    this.state = 'aim'; this.acc = 0; this.power = 0; this.top = 0; this.side = 0;
+    this.aimAngle = 0;
+    this.refreshHud();
+  }
+
+  refreshHud() {
+    const name = g => g === 'solid' ? 'Solids' : g === 'stripe' ? 'Stripes' : 'Open';
+    [this.p1Text, this.p2Text].forEach((t, i) => {
+      const cur = this.rules.turn === i && this.rules.winner < 0;
+      t.setText((cur ? '▶ ' : '') + 'Player ' + (i + 1) + ' · ' + name(this.rules.groups[i]));
+      t.setColor(cur ? '#ffd166' : '#8fb39b');
+    });
+    this.layoutTrays();
+  }
+
+  layoutTrays() {
+    const lists = [[], [], []];
+    for (const n of this.potted) {
+      let idx = 2;
+      const g = Rules.groupOf(n);
+      if (n !== 8 && this.rules.groups[0]) idx = g === this.rules.groups[0] ? 0 : 1;
+      lists[idx].push(n);
+    }
+    const Y = 683;
+    lists[0].forEach((n, i) => this.trayImgs[n].setPosition(100 + i * 22, Y));
+    lists[1].forEach((n, i) => this.trayImgs[n].setPosition(1180 - i * 22, Y));
+    lists[2].forEach((n, i) => this.trayImgs[n].setPosition(CX + (i - (lists[2].length - 1) / 2) * 22, Y));
+  }
+
+  finishShot() {
+    const res = this.rules.evaluate(this.shotLog, this.before);
+    this.state = 'aim';
+    if (!this.sim.balls[0].active) this.respawnCue();
+    this.top = 0; this.side = 0;                  // dial returns to the centre after every shot
+    const who = i => 'Player ' + (i + 1);
+    const prev = this._shooter;
+
+    if (res.rerack) {
+      this.rules.rerack(); this.newRack();
+      this.msg.setText(who(this.rules.turn) + ' ' + res.reason);
+      return;
+    }
+    if (this.rules.winner >= 0) {
+      this.state = 'over';
+      const why = res.reason ? ' (' + res.reason + ')' : '';
+      this.msg.setText(who(this.rules.winner) + ' wins!' + why + '  Press RESET to play again');
+      this.refreshHud(); return;
+    }
+    let text;
+    if (res.foul) text = 'Foul: ' + res.reason + '. ' + who(this.rules.turn) + ' has ball in hand';
+    else if (res.continues) text = who(prev) + ' continues' + (res.assigned ? ' as ' + (this.rules.groups[prev] === 'solid' ? 'Solids' : 'Stripes') : '');
+    else text = who(this.rules.turn) + "'s turn";
+    if (res.assigned && !res.foul && !res.continues) text += ' (' + who(prev) + ' is ' + (this.rules.groups[prev] === 'solid' ? 'Solids' : 'Stripes') + ')';
+    if (this.rules.ballInHand && !res.foul) text += ' - ball in hand';
+    this.msg.setText(text);
+    this.refreshHud();
+  }
+
+  respawnCue() {
+    const c = this.sim.balls[0], s = this.spr[0];
+    this.tweens.killTweensOf([s.ball, s.shine, s.shadow]);   // stop the "falling into pocket" animation
+    c.active = true; c.vx = 0; c.vy = 0; c.rvx = 0; c.rvy = 0; c.w = 0; c.x = HEAD_X; c.y = CY;
+    let guard = 0;
+    while (guard++ < 40 && this.sim.balls.some(o => o !== c && o.active && Math.hypot(o.x - c.x, o.y - c.y) < 2 * BR + 2)) c.x += 2 * BR + 2;
+    [s.ball, s.shine].forEach(o => o.setVisible(true).setDisplaySize(BR * 2, BR * 2));
+    s.shadow.setVisible(true).setDisplaySize(BR * 3.4, BR * 3.4);
+  }
+
+  /* ---------- input ---------- */
+  onDown(p) {
+    if (this.state !== 'aim' || p.y < 60) return;
+    if (Math.hypot(p.x - SPIN.x, p.y - SPIN.y) <= SPIN.r + 10) { this.spinning = true; this.setSpin(p); return; }
+    if (p.x > 1200 && p.y < 612) { this.sliding = true; this.setPower(p.y); return; }
+    const c = this.sim.balls[0];
+    if (this.rules.ballInHand && Math.hypot(p.x - c.x, p.y - c.y) < 28) { this.dragCue = true; return; }
+    this.aiming = true; this.setAim(p);
+  }
+  onMove(p) {
+    if (!p.isDown) return;
+    if (this.dragCue) this.placeCue(p.x, p.y);
+    else if (this.spinning) this.setSpin(p);
+    else if (this.sliding) this.setPower(p.y);
+    else if (this.aiming) this.setAim(p);
+  }
+  onUp() {
+    if (this.sliding) {
+      this.sliding = false;
+      if (this.power > 0.04 && this.state === 'aim') this.fire();
+      this.power = 0;
+    }
+    this.aiming = false; this.spinning = false; this.dragCue = false;
+  }
+  setAim(p) {
+    const c = this.sim.balls[0];
+    if (Math.hypot(p.x - c.x, p.y - c.y) < 10) return;
+    this.aimAngle = Math.atan2(p.y - c.y, p.x - c.x);
+  }
+  setPower(y) {
+    this.power = Phaser.Math.Clamp((y - SLIDER.y0) / (SLIDER.y1 - SLIDER.y0), 0, 1);
+  }
+  setSpin(p) {
+    let dx = (p.x - SPIN.x) / (SPIN.r * 0.82), dy = (p.y - SPIN.y) / (SPIN.r * 0.82);
+    const m = Math.hypot(dx, dy);
+    if (m > 1) { dx /= m; dy /= m; }
+    if (m < 0.12) { dx = 0; dy = 0; }             // snap to centre
+    this.side = dx; this.top = -dy;
+  }
+  placeCue(px, py) {                              // ball in hand: keep the cue ball legal while dragging
+    const c = this.sim.balls[0];
+    const maxX = this.rules.breakShot ? HEAD_X : R - BR;
+    let x = Phaser.Math.Clamp(px, L + BR, maxX), y = Phaser.Math.Clamp(py, T + BR, B - BR);
+    for (let k = 0; k < 2; k++) {
+      for (const o of this.sim.balls) {
+        if (o === c || !o.active) continue;
+        const d = Math.hypot(x - o.x, y - o.y), m = 2 * BR + 1;
+        if (d < m) { const q = m / (d || 1); x = o.x + (x - o.x) * q; y = o.y + (y - o.y) * q; }
+      }
+      for (const q of POCKETS) {
+        const d = Math.hypot(x - q.x, y - q.y), m = q.r + BR + 4;
+        if (d < m) { const z = m / (d || 1); x = q.x + (x - q.x) * z; y = q.y + (y - q.y) * z; }
+      }
+      x = Phaser.Math.Clamp(x, L + BR, maxX); y = Phaser.Math.Clamp(y, T + BR, B - BR);
+    }
+    c.x = x; c.y = y;
+  }
+  fire() {
+    this.before = new Set(this.sim.balls.filter(b => b.active && b.n !== 0).map(b => b.n));
+    this.shotLog = [];
+    this._shooter = this.rules.turn;
+    this.sim.shoot(this.aimAngle, this.power, this.top, this.side);
+    this.state = 'moving'; this.acc = 0;
+    this.msg.setText('');
+  }
+
+  /* ---------- sound (tiny synth, no audio files) ---------- */
+  sfx(kind, v) {
+    const ctx = this.sound && this.sound.context;
+    if (!ctx) return;
+    const t0 = ctx.currentTime, o = ctx.createOscillator(), g = ctx.createGain();
+    const vol = Math.min(0.3, v / 2000 * 0.3 + 0.03);
+    if (kind === 'ball') { o.type = 'triangle'; o.frequency.setValueAtTime(1300, t0); o.frequency.exponentialRampToValueAtTime(420, t0 + 0.05); }
+    else if (kind === 'wall') { o.type = 'sine'; o.frequency.setValueAtTime(260, t0); o.frequency.exponentialRampToValueAtTime(120, t0 + 0.06); }
+    else { o.type = 'sine'; o.frequency.setValueAtTime(170, t0); o.frequency.exponentialRampToValueAtTime(70, t0 + 0.18); }
+    const dur = kind === 'pocket' ? 0.2 : 0.07;
+    g.gain.setValueAtTime(vol, t0); g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+    o.connect(g); g.connect(ctx.destination); o.start(t0); o.stop(t0 + dur + 0.02);
+  }
+
+  onPocket(b, p) {
+    const i = this.sim.balls.indexOf(b), s = this.spr[i];
+    this.tweens.add({ targets: [s.ball, s.shine, s.shadow], x: p.x, y: p.y, scale: 0, duration: 160 });
+    if (b.n !== 0) {
+      this.potted.push(b.n);
+      this.trayImgs[b.n] = this.add.image(0, 0, 'ball' + b.n).setDepth(6).setDisplaySize(20, 20);
+      this.layoutTrays();
+    }
+  }
+
+  /* ---------- frame loop ---------- */
+  update(time, delta) {
+    if (this.state === 'moving') {
+      this.acc += Math.min(delta / 1000, 0.05);
+      while (this.acc >= STEP) { this.sim.step(STEP); this.acc -= STEP; }
+      let played = 0;
+      for (const ev of this.sim.events.splice(0)) {
+        if (ev.type === 'pocket') { this.shotLog.push({ type: 'pocket', n: ev.n }); this.onPocket(ev.ball, ev.pocket); this.sfx('pocket', 800); }
+        else {
+          if (ev.v > 8) this.shotLog.push({ type: ev.type, a: ev.a, b: ev.b, n: ev.n, v: ev.v });
+          if (played < 4 && ev.v > 20) { this.sfx(ev.type, ev.v); played++; }
+        }
+      }
+      if (!this.sim.isMoving()) this.finishShot();
+    }
+    this.sync(Math.min(delta / 1000, 0.05));
+    this.drawAim();
+    this.drawSlider();
+    this.drawSpin();
+  }
+
+  drawRoll(n) {
+    renderSphere(this.rollOut[n], this.eq[n], this.ori[n]);
+    this.rollCtx[n].getContext().putImageData(this.rollOut[n], 0, 0);
+    this.rollCtx[n].refresh();
+  }
+
+  sync(dt) {
+    this.frame = (this.frame || 0) + 1;
+    this.sim.balls.forEach((b, i) => {
+      if (!b.active) return;
+      const s = this.spr[i];
+      s.ball.setPosition(b.x, b.y);
+      s.shine.setPosition(b.x, b.y);
+      s.shadow.setPosition(b.x + 3, b.y + 4);
+      // rolling: top surface moves with the "roll velocity" (= v for a rolling ball, differs for a skidding cue ball)
+      const rx = b.n === 0 ? b.rvx : b.vx, ry = b.n === 0 ? b.rvy : b.vy, wz = b.n === 0 ? b.w : 0;
+      if (Math.abs(rx) + Math.abs(ry) + Math.abs(wz) < 3) return;
+      let M = matMul(rotInc(ry / BR, -rx / BR, wz / BR, dt), this.ori[b.n]);
+      if (this.frame % 60 === 0) M = orthonormalize(M);
+      this.ori[b.n] = M;
+      this.drawRoll(b.n);
+    });
+  }
+
+  dashed(g, x0, y0, x1, y1) {
+    const len = Math.hypot(x1 - x0, y1 - y0), ux = (x1 - x0) / len, uy = (y1 - y0) / len;
+    for (let d = 0; d < len; d += 16) {
+      const e = Math.min(d + 8, len);
+      g.lineBetween(x0 + ux * d, y0 + uy * d, x0 + ux * e, y0 + uy * e);
+    }
+  }
+
+  drawAim() {
+    const g = this.g; g.clear();
+    const c = this.sim.balls[0];
+    if (this.state !== 'aim' || !c.active) return;
+    if (this.rules.ballInHand) { g.lineStyle(2, 0xffd166, 0.9); g.strokeCircle(c.x, c.y, BR + 7); }
+    if (this.rules.breakShot && this.rules.ballInHand) { g.lineStyle(1, 0xffffff, 0.25); g.lineBetween(HEAD_X, T, HEAD_X, B); }
+    const dx = Math.cos(this.aimAngle), dy = Math.sin(this.aimAngle);
+    const hit = this.sim.rayHit(dx, dy);
+
+    g.lineStyle(2, 0xffffff, 0.7);
+    this.dashed(g, c.x + dx * BR, c.y + dy * BR, hit.x, hit.y);
+    if (hit.kind !== 'none') { g.lineStyle(2, 0xffffff, 0.9); g.strokeCircle(hit.x, hit.y, BR); }
+
+    if (hit.kind === 'ball') {                       // preview of the object ball + cue deflection
+      let nx = hit.ball.x - hit.x, ny = hit.ball.y - hit.y;
+      const nl = Math.hypot(nx, ny); nx /= nl; ny /= nl;
+      g.lineStyle(3, 0xffd166, 0.9);
+      g.lineBetween(hit.ball.x, hit.ball.y, hit.ball.x + nx * 80, hit.ball.y + ny * 80);
+      let tx = dx - (dx * nx + dy * ny) * nx, ty = dy - (dx * nx + dy * ny) * ny;
+      const tl = Math.hypot(tx, ty);
+      if (tl > 0.01) {
+        tx /= tl; ty /= tl;
+        g.lineStyle(2, 0xffffff, 0.5);
+        g.lineBetween(hit.x, hit.y, hit.x + tx * 50, hit.y + ty * 50);
+      }
+    }
+
+    // red dot on the cue ball = where the tip will hit (spin)
+    g.fillStyle(0xd92b2b, 1);
+    g.fillCircle(c.x + this.side * BR * 0.62, c.y - this.top * BR * 0.62, 2.6);
+
+    // cue stick (pulls back with power)
+    const pull = this.power * 80, tip = BR + 5 + pull, len = 340;
+    const px = -dy, py = dx;
+    const sx = c.x - dx * tip, sy = c.y - dy * tip;
+    const mx = c.x - dx * (tip + len * 0.7), my = c.y - dy * (tip + len * 0.7);
+    const ex = c.x - dx * (tip + len), ey = c.y - dy * (tip + len);
+    g.fillStyle(0xe2b97a, 1);
+    g.fillPoints([{ x: sx + px * 2.5, y: sy + py * 2.5 }, { x: mx + px * 4.5, y: my + py * 4.5 }, { x: mx - px * 4.5, y: my - py * 4.5 }, { x: sx - px * 2.5, y: sy - py * 2.5 }], true);
+    g.fillStyle(0x3b2412, 1);
+    g.fillPoints([{ x: mx + px * 4.5, y: my + py * 4.5 }, { x: ex + px * 7, y: ey + py * 7 }, { x: ex - px * 7, y: ey - py * 7 }, { x: mx - px * 4.5, y: my - py * 4.5 }], true);
+    g.fillStyle(0xffffff, 1);
+    g.fillPoints([{ x: sx + px * 2.5, y: sy + py * 2.5 }, { x: sx - dx * 8 + px * 2.7, y: sy - dy * 8 + py * 2.7 }, { x: sx - dx * 8 - px * 2.7, y: sy - dy * 8 - py * 2.7 }, { x: sx - px * 2.5, y: sy - py * 2.5 }], true);
+  }
+
+  drawSlider() {
+    const u = this.ui; u.clear();
+    const { x, y0, y1 } = SLIDER;
+    u.fillStyle(0x16241c, 1); u.fillRoundedRect(x - 8, y0 - 8, 16, y1 - y0 + 16, 8);
+    const hy = y0 + this.power * (y1 - y0);
+    const col = this.power < 0.5 ? 0x4ade80 : this.power < 0.8 ? 0xfacc15 : 0xef4444;
+    if (this.power > 0) { u.fillStyle(col, 1); u.fillRoundedRect(x - 8, y0 - 8, 16, hy - y0 + 8, 8); }
+    u.fillStyle(0xffffff, this.state === 'aim' ? 0.95 : 0.35); u.fillCircle(x, hy, 18);
+    u.lineStyle(3, col, 1); u.strokeCircle(x, hy, 18);
+  }
+
+  drawSpin() {                                    // drawn on the same graphics object, after the slider
+    const u = this.ui, { x, y, r } = SPIN, a = this.state === 'aim' ? 1 : 0.4;
+    u.fillStyle(0x16241c, a); u.fillCircle(x, y, r + 4);
+    u.fillStyle(0xf6f3ea, a); u.fillCircle(x, y, r);
+    u.lineStyle(1, 0x9a9a9a, 0.8 * a);
+    u.lineBetween(x - r, y, x + r, y); u.lineBetween(x, y - r, x, y + r); u.strokeCircle(x, y, r * 0.5);
+    u.fillStyle(0xd92b2b, a); u.fillCircle(x + this.side * r * 0.82, y - this.top * r * 0.82, 6);
+  }
+}
+
+new Phaser.Game({
+  type: Phaser.AUTO,
+  parent: 'game',
+  width: W, height: H,
+  backgroundColor: '#0b130f',
+  scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
+  render: { antialias: true },
+  input: { activePointers: 3 },
+  scene: Main
+});
+</script>
+</body>
+</html>
