@@ -902,7 +902,7 @@ class Main extends Phaser.Scene {
   }
 
   /* ---------- sound (tiny synth, no audio files) ----------
-     ball-ball: a sharp "tick" (short band-passed noise) + the ring of a hard ball (a few inharmonic partials) + a tiny knock.
+     ball-ball: a short click + a broad "tick" + a dull knock (no long pure tones: they sound like glass).
      The harder the hit, the louder AND brighter it gets, and every hit varies a little so it never sounds machine-made.
      cushion: a dull low thud.  pocket: a low drop.
      Tuning: SFX_VOL = master volume; for ball sounds change the frequencies in the 'ball' branch. */
@@ -930,9 +930,10 @@ class Main extends Phaser.Scene {
     };
     const j = 1 + (Math.random() - 0.5) * 0.1;
     if (kind === 'ball') {
-      burst(2500 + 3000 * loud, 0.9, vol * 1.0, 0.018, 'bandpass');   // the sharp tick
-      tone(2900 * j, vol * 0.30, 0.05); tone(5400 * j, vol * 0.18, 0.035); tone(1500 * j, vol * 0.22, 0.04);   // hard-ball ring
-      tone(700 * j, vol * 0.28, 0.025);                               // short body knock
+      burst(2200, 0.5, vol * 0.22, 0.005, 'highpass');                 // the very short click of the contact
+      burst(1300 + 900 * loud, 0.8, vol * 1.0, 0.024, 'bandpass');   // broad "tick" (no pure high tones: those sound like glass)
+      tone(850 * j, vol * 0.7, 0.02); tone(520 * j, vol * 0.5, 0.035);   // dull body knock of a heavy resin ball
+      tone(2300 * j, vol * 0.06, 0.012);                              // barely-there ring
     } else if (kind === 'wall') {
       burst(450, 0.7, vol * 0.9, 0.06, 'lowpass');
       tone(160 * j, vol * 0.7, 0.09); tone(95 * j, vol * 0.5, 0.12);
