@@ -485,6 +485,7 @@ function buildTextures(scene) {
     let g = c.createLinearGradient(0, T - 56, 0, B + 56);
     g.addColorStop(0, '#7a4a24'); g.addColorStop(0.5, '#5a3318'); g.addColorStop(1, '#3f230f');
     c.fillStyle = g; rr(c, L - 56, T - 56, R - L + 112, B - T + 112, 34); c.fill();
+    const frameG = g;                                    // kept to repaint the frame where the pocket cuts the cushion strip
     c.strokeStyle = 'rgba(255,220,170,0.25)'; c.lineWidth = 2;
     rr(c, L - 54, T - 54, R - L + 108, B - T + 108, 32); c.stroke();
     c.fillStyle = '#1d6b3b'; rr(c, L - 24, T - 24, R - L + 48, B - T + 48, 14); c.fill();
@@ -495,16 +496,18 @@ function buildTextures(scene) {
     c.beginPath(); c.moveTo(L + 250, T); c.lineTo(L + 250, B); c.stroke();
     c.fillStyle = 'rgba(255,255,255,0.25)';
     for (const sx of [L + 250, L + (R - L) * 0.75]) { c.beginPath(); c.arc(sx, CY, 3, 0, Math.PI * 2); c.fill(); }
-    for (const p of POCKETS) {                           // dark pocket: the channel / funnel + a round back
-      c.fillStyle = '#050505';
+    for (const p of POCKETS) {
+      // the channel / funnel only decides how the cushion strip is CUT: that area shows the frame again (not black)
+      c.save();
       c.beginPath(); c.moveTo(p.poly[0].x, p.poly[0].y);
       for (let i = 1; i < p.poly.length; i++) c.lineTo(p.poly[i].x, p.poly[i].y);
-      c.closePath(); c.fill();
-      c.beginPath(); c.arc(p.x, p.y, p.r, 0, Math.PI * 2); c.fill();
-    }
-    for (const j of JAWS) {                              // rubber knuckles at the pocket mouths
-      c.fillStyle = '#14502c'; c.beginPath(); c.arc(j.x, j.y, JAW_R, 0, Math.PI * 2); c.fill();
-      c.strokeStyle = 'rgba(255,255,255,0.22)'; c.lineWidth = 1.5; c.stroke();
+      c.closePath(); c.clip();
+      c.fillStyle = frameG; c.fillRect(0, 0, W, H);
+      c.restore();
+      // the real pocket is the circle
+      const hg = c.createRadialGradient(p.x, p.y + p.r * 0.35, p.r * 0.1, p.x, p.y, p.r);
+      hg.addColorStop(0, '#000000'); hg.addColorStop(0.55, '#050101'); hg.addColorStop(1, '#4a0505');
+      c.fillStyle = hg; c.beginPath(); c.arc(p.x, p.y, p.r, 0, Math.PI * 2); c.fill();
     }
     c.fillStyle = '#e8dcc0';
     const dia = (x, y) => { c.beginPath(); c.moveTo(x, y - 5); c.lineTo(x + 5, y); c.lineTo(x, y + 5); c.lineTo(x - 5, y); c.closePath(); c.fill(); };
