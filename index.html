@@ -71,11 +71,16 @@ const WALLS = [], POCKETS = [];
     const hx = Cx + ux * CORNER_HOLE_OFF, hy = Cy + uy * CORNER_HOLE_OFF, tv = (hx - A1.x) * ux + (hy - A1.y) * uy;   // drawing only: run the channel into the hole
     const V1 = { x: A1.x + ux * tv, y: A1.y + uy * tv }, V2 = { x: A2.x + ux * tv, y: A2.y + uy * tv };
     const S1 = { x: A1.x - ux * 4, y: A1.y - uy * 4 }, S2 = { x: A2.x - ux * 4, y: A2.y - uy * 4 };   // drawing only: start a little inside the table so the cut reaches the cushion
-    POCKETS.push({ x: hx, y: hy, r: CORNER_HOLE_D / 2, poly: [S1, V1, V2, S2] });
+    const k1 = (A1.y - Cy) / uy, k2 = (A2.x - Cx) / ux;                       // where each wall meets the cushion line (drawing only)
+    const edges = [
+      { x1: A1.x - ux * k1, y1: A1.y - uy * k1, x2: V1.x, y2: V1.y, nx: px, ny: py },
+      { x1: A2.x - ux * k2, y1: A2.y - uy * k2, x2: V2.x, y2: V2.y, nx: -px, ny: -py }
+    ];
+    POCKETS.push({ x: hx, y: hy, r: CORNER_HOLE_D / 2, poly: [S1, V1, V2, S2], edges });
   }
   const ang = SIDE_WALL_ANGLE - Math.PI / 2, sa = Math.sin(ang), ca = Math.cos(ang);
   for (const sy of [-1, 1]) {                                                // side pockets
-    const Cy = sy < 0 ? T : B, pts = [];
+    const Cy = sy < 0 ? T : B, pts = [], edges = [];
     for (const sg of [-1, 1]) {
       const K = { x: CX + sg * JS, y: Cy + sy * r };
       const w = { x: -sg * sa, y: sy * ca }, n = { x: -sg * ca, y: -sy * sa };   // w = wall direction (outward), n = toward the axis
@@ -86,8 +91,10 @@ const WALLS = [], POCKETS = [];
       const tv = (Cy + sy * SIDE_HOLE_OFF - A.y) / (sy * ca);                          // drawing only: run the funnel into the hole
       const kb = (sy * (A.y - Cy) + 2) / ca;                                           // drawing only: start 2 px inside the table so the cut reaches the cushion
       pts.push({ x: A.x - w.x * kb, y: A.y - w.y * kb }, { x: A.x + w.x * tv, y: A.y + w.y * tv });
+      const k0 = sy * (A.y - Cy) / ca;                                                 // wall meets the cushion line (drawing only)
+      edges.push({ x1: A.x - w.x * k0, y1: A.y - w.y * k0, x2: A.x + w.x * tv, y2: A.y + w.y * tv, nx: n.x, ny: n.y });
     }
-    POCKETS.push({ x: CX, y: Cy + sy * SIDE_HOLE_OFF, r: SIDE_HOLE_D / 2, poly: [pts[0], pts[1], pts[3], pts[2]] });
+    POCKETS.push({ x: CX, y: Cy + sy * SIDE_HOLE_OFF, r: SIDE_HOLE_D / 2, poly: [pts[0], pts[1], pts[3], pts[2]], edges });
   }
 })();
 // cushion exists only between the knuckles; inside a mouth there is no wall
@@ -514,14 +521,29 @@ function buildTextures(scene) {
     c.fillStyle = 'rgba(255,255,255,0.25)';
     for (const sx of [L + 250, L + (R - L) * 0.75]) { c.beginPath(); c.arc(sx, CY, 3, 0, Math.PI * 2); c.fill(); }
     for (const p of POCKETS) {
-      // the channel / funnel only decides how the cushion strip is CUT: that area shows the table floor (not black)
+      // 1) the cushion face keeps going along the cut walls (inside the strip only)
+      c.save();
+      c.beginPath(); c.rect(L - 24, T - 24, R - L + 48, B - T + 48); c.clip();
+      c.strokeStyle = CUSHION_FACE; c.lineWidth = 2 * FACE_W; c.lineCap = 'butt';
+      for (const e of p.edges) { c.beginPath(); c.moveTo(e.x1, e.y1); c.lineTo(e.x2, e.y2); c.stroke(); }
+      c.restore();
+      // 2) the channel / funnel only decides how the cushion strip is CUT: that area shows the table floor
       c.save();
       c.beginPath(); c.moveTo(p.poly[0].x, p.poly[0].y);
       for (let i = 1; i < p.poly.length; i++) c.lineTo(p.poly[i].x, p.poly[i].y);
       c.closePath(); c.clip();
       c.fillStyle = CUT_FILL; c.fillRect(0, 0, W, H);
+      // 3) the cut walls throw the same soft shadow on the floor as the straight cushions
+      for (const e of p.edges) {
+        const gr = c.createLinearGradient(e.x1, e.y1, e.x1 + e.nx * SH, e.y1 + e.ny * SH);
+        gr.addColorStop(0, 'rgba(0,0,0,0.42)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+        c.fillStyle = gr; c.fillRect(0, 0, W, H);
+      }
       c.restore();
-      // the real pocket is the circle
+      // 4) bright cushion edge along the cut walls
+      c.strokeStyle = CUSHION_EDGE; c.lineWidth = 2; c.lineCap = 'butt';
+      for (const e of p.edges) { c.beginPath(); c.moveTo(e.x1, e.y1); c.lineTo(e.x2, e.y2); c.stroke(); }
+      // 5) the real pocket is the circle
       const hg = c.createRadialGradient(p.x, p.y + p.r * 0.35, p.r * 0.1, p.x, p.y, p.r);
       hg.addColorStop(0, '#000000'); hg.addColorStop(0.55, '#050101'); hg.addColorStop(1, '#4a0505');
       c.fillStyle = hg; c.beginPath(); c.arc(p.x, p.y, p.r, 0, Math.PI * 2); c.fill();
