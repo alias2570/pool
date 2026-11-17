@@ -485,7 +485,7 @@ function buildTextures(scene) {
     let g = c.createLinearGradient(0, T - 56, 0, B + 56);
     g.addColorStop(0, '#7a4a24'); g.addColorStop(0.5, '#5a3318'); g.addColorStop(1, '#3f230f');
     c.fillStyle = g; rr(c, L - 56, T - 56, R - L + 112, B - T + 112, 34); c.fill();
-    const CUT_COLOR = '#1d6b3b';                         // colour inside the pocket cut = same green as the cushion strip (change it here)
+    const CUT_COLOR = null;                         // colour inside the pocket cut = same green as the cushion strip (change it here)
     c.strokeStyle = 'rgba(255,220,170,0.25)'; c.lineWidth = 2;
     rr(c, L - 54, T - 54, R - L + 108, B - T + 108, 32); c.stroke();
     c.fillStyle = '#1d6b3b'; rr(c, L - 24, T - 24, R - L + 48, B - T + 48, 14); c.fill();
@@ -502,7 +502,11 @@ function buildTextures(scene) {
       c.beginPath(); c.moveTo(p.poly[0].x, p.poly[0].y);
       for (let i = 1; i < p.poly.length; i++) c.lineTo(p.poly[i].x, p.poly[i].y);
       c.closePath(); c.clip();
-      c.fillStyle = CUT_COLOR; c.fillRect(0, 0, W, H);
+      const pocketCloth = c.createRadialGradient(CX, CY, 60, CX, CY, 620);
+pocketCloth.addColorStop(0, '#2f9a57');
+pocketCloth.addColorStop(1, '#1b6639');
+c.fillStyle = pocketCloth;
+c.fillRect(0, 0, W, H);
       c.restore();
       // the real pocket is the circle
       const hg = c.createRadialGradient(p.x, p.y + p.r * 0.35, p.r * 0.1, p.x, p.y, p.r);
