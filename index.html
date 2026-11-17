@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<title>Pool - Step 5</title>
+<title>Pool - Step 6</title>
 <style>
   html,body{margin:0;height:100%;background:#0b130f;overflow:hidden;touch-action:none;overscroll-behavior:none;
     -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
@@ -33,15 +33,17 @@ const BR = 14.706;                                   // ball radius
      clear width MOUTH_C at the start AND at the end of the walls, wall length CORNER_WALL_LEN.
    SIDE pockets: a trapezoid (funnel). Clear mouth MOUTH_S between the knuckles, walls lean SIDE_WALL_ANGLE-90 degrees
      from perpendicular so the funnel narrows to SIDE_BACK_W at its end.
-   Capture (TEMPORARY, step 2 will replace it): a ball is pocketed when its centre gets inside the small
-     circle at the end of the walls (radius HOLE_R_C / HOLE_R_S).
+   HOLE (the pocket circle): a ball is pocketed when its CENTRE gets inside the circle.
+     CORNER: diameter CORNER_HOLE_D, centre CORNER_HOLE_OFF outside the corner where the two cushions meet (on the diagonal).
+     SIDE:   diameter SIDE_HOLE_D,   centre SIDE_HOLE_OFF outside the cushion line.
    E_CHEEK = bounciness of the pocket walls. */
 const DB = 2 * BR;                                   // ball diameter
 const JAW_R = 6, E_JAW = 0.6, E_CHEEK = 0.5;
 const MOUTH_C = 1.84 * DB, MOUTH_S = 2.0 * DB;
 const CORNER_WALL_LEN = 0.73 * DB;
 const SIDE_BACK_W = 1.62 * DB, SIDE_WALL_ANGLE = 105 * Math.PI / 180;
-const HOLE_R_C = 14, HOLE_R_S = 12, FALL_V = 60;   // FALL_V: a ball slower than this (px/s) past the cushion line drops in
+const CORNER_HOLE_D = 2.23 * DB, CORNER_HOLE_OFF = 0.69 * DB;
+const SIDE_HOLE_D = 1.67 * DB, SIDE_HOLE_OFF = 0.9 * DB;
 const JC = (MOUTH_C + 2 * JAW_R) / Math.SQRT2 - JAW_R;   // corner knuckle distance from the corner, along the rail
 const JS = MOUTH_S / 2 + JAW_R;                          // side knuckle distance from the table centre
 // each knuckle is tangent to the cushion line, so a ball sliding along the rail passes it with no bump
@@ -66,7 +68,7 @@ const WALLS = [], POCKETS = [];
     const B1 = { x: A1.x + ux * CORNER_WALL_LEN, y: A1.y + uy * CORNER_WALL_LEN };
     const B2 = { x: A2.x + ux * CORNER_WALL_LEN, y: A2.y + uy * CORNER_WALL_LEN };
     WALLS.push({ x1: A1.x, y1: A1.y, x2: B1.x, y2: B1.y }, { x1: A2.x, y1: A2.y, x2: B2.x, y2: B2.y });
-    POCKETS.push({ x: (B1.x + B2.x) / 2, y: (B1.y + B2.y) / 2, r: HOLE_R_C, poly: [A1, B1, B2, A2] });
+    POCKETS.push({ x: Cx + ux * CORNER_HOLE_OFF, y: Cy + uy * CORNER_HOLE_OFF, r: CORNER_HOLE_D / 2, poly: [A1, B1, B2, A2] });
   }
   const ang = SIDE_WALL_ANGLE - Math.PI / 2, sa = Math.sin(ang), ca = Math.cos(ang);
   for (const sy of [-1, 1]) {                                                // side pockets
@@ -80,7 +82,7 @@ const WALLS = [], POCKETS = [];
       WALLS.push({ x1: A.x, y1: A.y, x2: Bp.x, y2: Bp.y });
       pts.push(A, Bp);
     }
-    POCKETS.push({ x: CX, y: pts[1].y, r: HOLE_R_S, poly: [pts[0], pts[1], pts[3], pts[2]] });
+    POCKETS.push({ x: CX, y: Cy + sy * SIDE_HOLE_OFF, r: SIDE_HOLE_D / 2, poly: [pts[0], pts[1], pts[3], pts[2]] });
   }
 })();
 // cushion exists only between the knuckles; inside a mouth there is no wall
@@ -221,7 +223,7 @@ this.balls.push({
         b.rot += (b.vx * 0.8 + b.vy * 0.6) * dt / BR * 0.5;
       }
     }
-    // pockets: centre inside the capture circle at the end of the pocket walls
+    // pockets: ball centre inside the pocket circle
     for (const b of bs) {
       if (!b.active) continue;
       let hit = null, near = null, bestD = 1e9;
@@ -231,8 +233,6 @@ this.balls.push({
         if (d < bestD) { bestD = d; near = p; }
       }
       if (!hit && (b.x < L - 40 || b.x > R + 40 || b.y < T - 40 || b.y > B + 40)) hit = near;   // safety net only
-      // a slow ball whose centre is already past the cushion line (inside a funnel / channel) falls in instead of stopping there
-      if (!hit && (b.x < L || b.x > R || b.y < T || b.y > B) && Math.hypot(b.vx, b.vy) < FALL_V) hit = near;
       if (hit) {
         b.active = false; b.vx = 0; b.vy = 0;
         if (b.n === 0) { b.rvx = 0; b.rvy = 0; b.w = 0; }
@@ -497,8 +497,7 @@ function buildTextures(scene) {
       c.beginPath(); c.moveTo(p.poly[0].x, p.poly[0].y);
       for (let i = 1; i < p.poly.length; i++) c.lineTo(p.poly[i].x, p.poly[i].y);
       c.closePath(); c.fill(); c.stroke();
-      const hw = Math.hypot(p.poly[1].x - p.poly[2].x, p.poly[1].y - p.poly[2].y) / 2;
-      c.beginPath(); c.arc(p.x, p.y, hw, 0, Math.PI * 2); c.fill();
+      c.beginPath(); c.arc(p.x, p.y, p.r, 0, Math.PI * 2); c.fill();
     }
     for (const j of JAWS) {                              // rubber knuckles at the pocket mouths
       c.fillStyle = '#14502c'; c.beginPath(); c.arc(j.x, j.y, JAW_R, 0, Math.PI * 2); c.fill();
