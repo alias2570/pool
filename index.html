@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<title>Pool - Step 6</title>
+<title>Pool - Step 7</title>
 <style>
   html,body{margin:0;height:100%;background:#0b130f;overflow:hidden;touch-action:none;overscroll-behavior:none;
     -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
@@ -118,6 +118,7 @@ const onRailY = y => y >= T + JC && y <= B - JC;
 const FRIC = 120, DRAG = 0.35, SLOW = 70, SLOWK = 1.4, TAILF = 2, STOP = 0.5;
 const E_BALL = 0.97, E_WALL = 0.85, MAXV = 2600;
 const STEP = 1 / 240;
+const SFX_VOL = 0.45;   // master volume of the synthesized sounds (0..1)
 const RACK_GAP = 1.0, RACK_JITTER = 0.3;   // px: فاصله‌ی بین توپ‌ها و دامنه‌ی نویز
 /* ---- Spin feel ----
    SLIDE      sliding friction while the cue ball skids (bigger = draw / follow "bite" sooner)
@@ -900,18 +901,45 @@ class Main extends Phaser.Scene {
     this.msg.setText('');
   }
 
-  /* ---------- sound (tiny synth, no audio files) ---------- */
+  /* ---------- sound (tiny synth, no audio files) ----------
+     ball-ball: a sharp "tick" (short band-passed noise) + the ring of a hard ball (a few inharmonic partials) + a tiny knock.
+     The harder the hit, the louder AND brighter it gets, and every hit varies a little so it never sounds machine-made.
+     cushion: a dull low thud.  pocket: a low drop.
+     Tuning: SFX_VOL = master volume; for ball sounds change the frequencies in the 'ball' branch. */
   sfx(kind, v) {
     const ctx = this.sound && this.sound.context;
     if (!ctx) return;
-    const t0 = ctx.currentTime, o = ctx.createOscillator(), g = ctx.createGain();
-    const vol = Math.min(0.3, v / 2000 * 0.3 + 0.03);
-    if (kind === 'ball') { o.type = 'triangle'; o.frequency.setValueAtTime(1300, t0); o.frequency.exponentialRampToValueAtTime(420, t0 + 0.05); }
-    else if (kind === 'wall') { o.type = 'sine'; o.frequency.setValueAtTime(260, t0); o.frequency.exponentialRampToValueAtTime(120, t0 + 0.06); }
-    else { o.type = 'sine'; o.frequency.setValueAtTime(170, t0); o.frequency.exponentialRampToValueAtTime(70, t0 + 0.18); }
-    const dur = kind === 'pocket' ? 0.2 : 0.07;
-    g.gain.setValueAtTime(vol, t0); g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
-    o.connect(g); g.connect(ctx.destination); o.start(t0); o.stop(t0 + dur + 0.02);
+    if (!this._noise) {                                              // one shared white-noise buffer
+      const n = Math.floor(ctx.sampleRate * 0.15), buf = ctx.createBuffer(1, n, ctx.sampleRate), d = buf.getChannelData(0);
+      for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+      this._noise = buf;
+    }
+    const t0 = ctx.currentTime, out = ctx.destination;
+    const loud = Math.min(1, Math.pow(Math.max(v, 0) / 1800, 0.6));   // 0..1
+    const vol = SFX_VOL * (0.1 + 0.9 * loud);
+    const env = (g, peak, dur) => { g.gain.setValueAtTime(peak, t0); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur); };
+    const tone = (f, peak, dur) => {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = 'sine'; o.frequency.value = f; env(g, peak, dur);
+      o.connect(g); g.connect(out); o.start(t0); o.stop(t0 + dur + 0.02);
+    };
+    const burst = (f, q, peak, dur, type) => {
+      const src = ctx.createBufferSource(), fl = ctx.createBiquadFilter(), g = ctx.createGain();
+      src.buffer = this._noise; fl.type = type; fl.frequency.value = f; fl.Q.value = q; env(g, peak, dur);
+      src.connect(fl); fl.connect(g); g.connect(out); src.start(t0, Math.random() * 0.05); src.stop(t0 + dur + 0.02);
+    };
+    const j = 1 + (Math.random() - 0.5) * 0.1;
+    if (kind === 'ball') {
+      burst(2500 + 3000 * loud, 0.9, vol * 1.0, 0.018, 'bandpass');   // the sharp tick
+      tone(2900 * j, vol * 0.30, 0.05); tone(5400 * j, vol * 0.18, 0.035); tone(1500 * j, vol * 0.22, 0.04);   // hard-ball ring
+      tone(700 * j, vol * 0.28, 0.025);                               // short body knock
+    } else if (kind === 'wall') {
+      burst(450, 0.7, vol * 0.9, 0.06, 'lowpass');
+      tone(160 * j, vol * 0.7, 0.09); tone(95 * j, vol * 0.5, 0.12);
+    } else {
+      burst(320, 0.7, vol * 0.8, 0.15, 'lowpass');
+      tone(120 * j, vol * 0.6, 0.2); tone(70 * j, vol * 0.4, 0.25);
+    }
   }
 
   onPocket(b, p) {
