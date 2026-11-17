@@ -70,7 +70,8 @@ const WALLS = [], POCKETS = [];
     WALLS.push({ x1: A1.x, y1: A1.y, x2: B1.x, y2: B1.y }, { x1: A2.x, y1: A2.y, x2: B2.x, y2: B2.y });
     const hx = Cx + ux * CORNER_HOLE_OFF, hy = Cy + uy * CORNER_HOLE_OFF, tv = (hx - A1.x) * ux + (hy - A1.y) * uy;   // drawing only: run the channel into the hole
     const V1 = { x: A1.x + ux * tv, y: A1.y + uy * tv }, V2 = { x: A2.x + ux * tv, y: A2.y + uy * tv };
-    POCKETS.push({ x: hx, y: hy, r: CORNER_HOLE_D / 2, poly: [A1, V1, V2, A2] });
+    const S1 = { x: A1.x - ux * 4, y: A1.y - uy * 4 }, S2 = { x: A2.x - ux * 4, y: A2.y - uy * 4 };   // drawing only: start a little inside the table so the cut reaches the cushion
+    POCKETS.push({ x: hx, y: hy, r: CORNER_HOLE_D / 2, poly: [S1, V1, V2, S2] });
   }
   const ang = SIDE_WALL_ANGLE - Math.PI / 2, sa = Math.sin(ang), ca = Math.cos(ang);
   for (const sy of [-1, 1]) {                                                // side pockets
@@ -83,7 +84,8 @@ const WALLS = [], POCKETS = [];
       const Bp = { x: A.x + w.x * len, y: A.y + w.y * len };
       WALLS.push({ x1: A.x, y1: A.y, x2: Bp.x, y2: Bp.y });
       const tv = (Cy + sy * SIDE_HOLE_OFF - A.y) / (sy * ca);                          // drawing only: run the funnel into the hole
-      pts.push(A, { x: A.x + w.x * tv, y: A.y + w.y * tv });
+      const kb = (sy * (A.y - Cy) + 2) / ca;                                           // drawing only: start 2 px inside the table so the cut reaches the cushion
+      pts.push({ x: A.x - w.x * kb, y: A.y - w.y * kb }, { x: A.x + w.x * tv, y: A.y + w.y * tv });
     }
     POCKETS.push({ x: CX, y: Cy + sy * SIDE_HOLE_OFF, r: SIDE_HOLE_D / 2, poly: [pts[0], pts[1], pts[3], pts[2]] });
   }
@@ -487,11 +489,26 @@ function buildTextures(scene) {
     c.fillStyle = g; rr(c, L - 56, T - 56, R - L + 112, B - T + 112, 34); c.fill();
     c.strokeStyle = 'rgba(255,220,170,0.25)'; c.lineWidth = 2;
     rr(c, L - 54, T - 54, R - L + 108, B - T + 108, 32); c.stroke();
-    c.fillStyle = '#1d6b3b'; rr(c, L - 24, T - 24, R - L + 48, B - T + 48, 14); c.fill();
+    /* cushions: darker base, a lighter face next to the playfield, a bright edge line and a soft shadow on the cloth
+       (colours are easy to change: CUSHION_BASE / CUSHION_FACE / CUSHION_EDGE) */
+    const CUSHION_BASE = '#0f4a2a', CUSHION_FACE = '#18733c', CUSHION_EDGE = '#4be07a', FACE_W = 10;
+    c.fillStyle = CUSHION_BASE; rr(c, L - 24, T - 24, R - L + 48, B - T + 48, 14); c.fill();
+    c.fillStyle = CUSHION_FACE;
+    c.fillRect(L, T - FACE_W, R - L, FACE_W); c.fillRect(L, B, R - L, FACE_W);
+    c.fillRect(L - FACE_W, T, FACE_W, B - T); c.fillRect(R, T, FACE_W, B - T);
     g = c.createRadialGradient(CX, CY, 60, CX, CY, 620);
     g.addColorStop(0, '#2f9a57'); g.addColorStop(1, '#1b6639');
     c.fillStyle = g; c.fillRect(L, T, R - L, B - T);
-    const CUT_FILL = g;      // the pocket cut shows the table floor (the same cloth gradient). Use '#1d6b3b' instead for the darker cushion-strip green
+    const CUT_FILL = g;      // the pocket cut shows the table floor (the same cloth gradient)
+    const SH = 24, shade = (x0, y0, x1, y1, rx, ry, rw, rh) => {      // shadow the cushion throws on the cloth
+      const gr = c.createLinearGradient(x0, y0, x1, y1);
+      gr.addColorStop(0, 'rgba(0,0,0,0.42)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+      c.fillStyle = gr; c.fillRect(rx, ry, rw, rh);
+    };
+    shade(0, T, 0, T + SH, L, T, R - L, SH); shade(0, B, 0, B - SH, L, B - SH, R - L, SH);
+    shade(L, 0, L + SH, 0, L, T, SH, B - T); shade(R, 0, R - SH, 0, R - SH, T, SH, B - T);
+    c.strokeStyle = CUSHION_EDGE; c.lineWidth = 2;                        // bright edge of the cushion
+    c.beginPath(); c.moveTo(L, T); c.lineTo(R, T); c.lineTo(R, B); c.lineTo(L, B); c.closePath(); c.stroke();
     c.strokeStyle = 'rgba(255,255,255,0.12)'; c.lineWidth = 2;
     c.beginPath(); c.moveTo(L + 250, T); c.lineTo(L + 250, B); c.stroke();
     c.fillStyle = 'rgba(255,255,255,0.25)';
