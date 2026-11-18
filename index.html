@@ -679,6 +679,7 @@ const SPIN = { x: 1238, y: 656, r: 32 };          // cue-ball contact dial (tip 
    Ball slots fill from the outer edge inwards.  Everything is positioned from these numbers. */
 const BAR_Y = 28, SLOT_D = 22, SLOT_DX = 26, SLOT0 = 96, SLOT1 = 1184;   // slot size, spacing, first-slot centre of player 1 / player 2
 const AV_X = [470, 810], AV_R = 19, AV_COL = [0x2f6fdb, 0xd9822b];       // avatar centres, radius, colours
+const TURN_TIME = 30, TURN_WARN = 8;                                      // seconds per turn; the ring turns red and ticks during the last TURN_WARN seconds
 const ENTRY_LABEL = 'FREE';                                              // league entry shown under the score (placeholder until leagues exist)
 const AIM_SENS = 1, AIM_MIN_R = 30;               // aiming feel (see setAim)
 const HEAD_X = L + 250;                           // head string (break placement limit)
@@ -714,6 +715,8 @@ class Main extends Phaser.Scene {
     this.g = this.add.graphics().setDepth(5);
     this.ui = this.add.graphics().setDepth(10);
 
+    this.ringG = this.add.graphics().setDepth(10);                               // live turn-timer ring (redrawn every frame)
+    this.turnLeft = TURN_TIME;
     this.hud = this.add.graphics().setDepth(9);                                  // bar background, slots, avatars, turn rings (redrawn in refreshHud)
     this.score = [0, 0];
     const tgUser = (() => { try { return window.Telegram.WebApp.initDataUnsafe.user; } catch (e) { return null; } })();
@@ -786,7 +789,7 @@ class Main extends Phaser.Scene {
     }
     Object.values(this.trayImgs).forEach(i => i.destroy());
     this.trayImgs = {}; this.potted = [];
-    this.state = 'aim'; this.acc = 0; this.power = 0; this.top = 0; this.side = 0;
+    this.state = 'aim'; this.acc = 0; this.power = 0; this.top = 0; this.side = 0; this.turnLeft = TURN_TIME;
     this.aimAngle = 0;
     this.refreshHud();
   }
@@ -806,7 +809,7 @@ class Main extends Phaser.Scene {
     for (let i = 0; i < 2; i++) {                                                  // avatar + turn ring
       const cur = this.rules.turn === i && this.rules.winner < 0;
       h.fillStyle(AV_COL[i], cur ? 1 : 0.55); h.fillCircle(AV_X[i], BAR_Y, AV_R);
-      h.lineStyle(3, cur ? 0x4ade80 : 0x2a3d31, 1); h.strokeCircle(AV_X[i], BAR_Y, AV_R + 4);
+      h.lineStyle(3, 0x2a3d31, 1); h.strokeCircle(AV_X[i], BAR_Y, AV_R + 4);   // dim track; the live timer ring is drawn on top every frame
       this.nameT[i].setColor(cur ? '#ffd166' : '#8fb39b');
       this.groupT[i].setText(gname(this.rules.groups[i]));
       this.letterT[i].setAlpha(cur ? 1 : 0.7);
@@ -829,7 +832,7 @@ class Main extends Phaser.Scene {
 
   finishShot() {
     const res = this.rules.evaluate(this.shotLog, this.before);
-    this.state = 'aim';
+    this.state = 'aim'; this.turnLeft = TURN_TIME;   // a fresh 30 s for whoever shoots next (also when the same player continues)
     if (!this.sim.balls[0].active) this.respawnCue();
     this.top = 0; this.side = 0;                  // dial returns to the centre after every shot
     const who = i => 'Player ' + (i + 1);
@@ -1049,10 +1052,47 @@ class Main extends Phaser.Scene {
       }
       if (!this.sim.isMoving()) this.finishShot();
     }
+    this.tickTurn(Math.min(delta / 1000, 0.1));
     this.sync(Math.min(delta / 1000, 0.05));
     this.drawAim();
+    this.drawRing();
     this.drawSlider();
     this.drawSpin();
+  }
+
+  /* ---------- turn timer ----------
+     Counts down only while the player is aiming (not while the balls roll).  Last TURN_WARN seconds: red ring + a tick every second.
+     At 0 the turn passes to the other player (no foul).  When the game goes online the server must own this clock. */
+  tickTurn(dt) {
+    if (this.state !== 'aim' || this.rules.winner >= 0) return;
+    const prev = this.turnLeft;
+    this.turnLeft = Math.max(0, prev - dt);
+    if (this.turnLeft > 0 && this.turnLeft <= TURN_WARN && Math.ceil(this.turnLeft) < Math.ceil(prev)) this.tickSound(this.turnLeft <= 3);
+    if (this.turnLeft <= 0) this.timeUp();
+  }
+  timeUp() {
+    this.sliding = this.aiming = this.spinning = this.dragCue = false; this.aimBase = null; this.power = 0;
+    this.top = 0; this.side = 0;
+    this.rules.turn = 1 - this.rules.turn;
+    this.turnLeft = TURN_TIME;
+    this.msg.setText('Time is up: Player ' + (this.rules.turn + 1) + "'s turn" + (this.rules.ballInHand ? ' - ball in hand' : ''));
+    this.refreshHud();
+  }
+  tickSound(urgent) {                              // short dry tick; higher and louder in the last 3 seconds
+    const ctx = this.sound && this.sound.context;
+    if (!ctx) return;
+    const t0 = ctx.currentTime, o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'square'; o.frequency.value = urgent ? 1900 : 1500;
+    g.gain.setValueAtTime(SAMPLE_VOL * (urgent ? 0.16 : 0.1), t0); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.045);
+    o.connect(g); g.connect(ctx.destination); o.start(t0); o.stop(t0 + 0.06);
+  }
+  drawRing() {                                     // the ring around the active avatar shrinks clockwise from the top as time runs out
+    const r = this.ringG; r.clear();
+    if (this.rules.winner >= 0) return;
+    const f = Phaser.Math.Clamp(this.turnLeft / TURN_TIME, 0, 1), i = this.rules.turn;
+    const warn = this.turnLeft <= TURN_WARN;
+    r.lineStyle(3, warn ? 0xef4444 : 0x4ade80, 1);
+    r.beginPath(); r.arc(AV_X[i], BAR_Y, AV_R + 4, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * f, false); r.strokePath();
   }
 
   drawRoll(n) {
