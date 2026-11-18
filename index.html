@@ -512,63 +512,56 @@ function buildTextures(scene) {
     g.addColorStop(0, '#2f9a57'); g.addColorStop(1, '#1b6639');
     c.fillStyle = g; c.fillRect(L, T, R - L, B - T);
     const CUT_FILL = g;      // the pocket cut shows the table floor (the same cloth gradient)
-    const SH = 24, shade = (x0, y0, x1, y1, rx, ry, rw, rh) => {      // shadow the cushion throws on the cloth
-      const gr = c.createLinearGradient(x0, y0, x1, y1);
-      gr.addColorStop(0, 'rgba(0,0,0,0.42)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
-      c.fillStyle = gr; c.fillRect(rx, ry, rw, rh);
-    };
-    shade(0, T, 0, T + SH, L, T, R - L, SH); shade(0, B, 0, B - SH, L, B - SH, R - L, SH);
-    shade(L, 0, L + SH, 0, L, T, SH, B - T); shade(R, 0, R - SH, 0, R - SH, T, SH, B - T);
-    c.strokeStyle = CUSHION_EDGE; c.lineWidth = 2;                        // bright edge of the cushion
-    c.beginPath(); c.moveTo(L, T); c.lineTo(R, T); c.lineTo(R, B); c.lineTo(L, B); c.closePath(); c.stroke();
-    c.strokeStyle = 'rgba(255,255,255,0.12)'; c.lineWidth = 2;
-    c.beginPath(); c.moveTo(L + 250, T); c.lineTo(L + 250, B); c.stroke();
-    c.fillStyle = 'rgba(255,255,255,0.25)';
-    for (const sx of [L + 250, L + (R - L) * 0.75]) { c.beginPath(); c.arc(sx, CY, 3, 0, Math.PI * 2); c.fill(); }
+    /* FLOOR = cloth rectangle + every pocket cut (the funnel / channel) + the pocket circle.
+       The cut is painted with the SAME cloth gradient, so the pocket entrance is exactly the floor colour.
+       ONE shadow pass is made from the shape of everything that is NOT floor (cushions, walls, jaws), so the shadow
+       runs along the straight cushion, turns round the bend, follows the walls into the channel and goes on to the circle,
+       with no break anywhere.  Tuning: SHADOW_A = darkness at the cushion edge, SHADOW_BLUR = how far the shadow reaches. */
+    const SHADOW_A = 0.85, SHADOW_BLUR = 26;
+    const mk = () => { const cv = document.createElement('canvas'); cv.width = W; cv.height = H; return cv; };
+    const polyPath = (ctx, pts) => { ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y); for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y); ctx.closePath(); };
+    // 1) cushion face along the cut walls, then the cut itself: crisp cloth between the walls
     for (const p of POCKETS) {
-      // 1) the cushion face keeps going along the cut walls (inside the strip only)
       c.save();
       c.beginPath(); c.rect(L - 24, T - 24, R - L + 48, B - T + 48); c.clip();
       c.strokeStyle = CUSHION_FACE; c.lineWidth = 2 * FACE_W; c.lineCap = 'butt';
       for (const e of p.edges) { c.beginPath(); c.moveTo(e.x1, e.y1); c.lineTo(e.x2, e.y2); c.stroke(); }
       c.restore();
-      // 2) the channel / funnel only decides how the cushion strip is CUT: that area shows the table floor
-      // the straight cushions' shadow must stop at the mouth: repaint clean floor in front of it, with soft edges
-      const m = document.createElement('canvas'); m.width = W; m.height = H;
-      const mc = m.getContext('2d');
-      mc.shadowColor = '#fff'; mc.shadowBlur = 8; mc.shadowOffsetX = W; mc.fillStyle = '#fff';   // polygon drawn off-canvas, only its blurred shadow lands here
-      mc.beginPath(); mc.moveTo(p.polyF[0].x - W, p.polyF[0].y);
-      for (let i = 1; i < p.polyF.length; i++) mc.lineTo(p.polyF[i].x - W, p.polyF[i].y);
-      mc.closePath(); mc.fill();
-      mc.shadowColor = 'transparent'; mc.globalCompositeOperation = 'source-in';
-      const fg = mc.createRadialGradient(CX, CY, 60, CX, CY, 620);
-      fg.addColorStop(0, '#2f9a57'); fg.addColorStop(1, '#1b6639');
-      mc.fillStyle = fg; mc.fillRect(0, 0, W, H);
-      c.save(); c.beginPath(); c.rect(L, T, R - L, B - T); c.clip(); c.drawImage(m, 0, 0); c.restore();
-      c.save();                                          // the cut itself: crisp floor between the walls
-      c.beginPath(); c.moveTo(p.poly[0].x, p.poly[0].y);
-      for (let i = 1; i < p.poly.length; i++) c.lineTo(p.poly[i].x, p.poly[i].y);
-      c.closePath(); c.clip();
-      c.fillStyle = CUT_FILL; c.fillRect(0, 0, W, H);
-      c.restore();
-      c.save();
-      c.beginPath(); c.moveTo(p.poly[0].x, p.poly[0].y);
-      for (let i = 1; i < p.poly.length; i++) c.lineTo(p.poly[i].x, p.poly[i].y);
-      c.closePath(); c.clip();
-      // 3) the cut walls throw the same soft shadow on the floor as the straight cushions
-      for (const e of p.edges) {
-        const gr = c.createLinearGradient(e.x1, e.y1, e.x1 + e.nx * SH, e.y1 + e.ny * SH);
-        gr.addColorStop(0, 'rgba(0,0,0,0.42)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
-        c.fillStyle = gr; c.fillRect(0, 0, W, H);
-      }
-      c.restore();
-      // 4) bright cushion edge along the cut walls
-      c.strokeStyle = CUSHION_EDGE; c.lineWidth = 2; c.lineCap = 'butt';
-      for (const e of p.edges) { c.beginPath(); c.moveTo(e.x1, e.y1); c.lineTo(e.x2, e.y2); c.stroke(); }
-      c.lineCap = 'round';                               // close the tiny gap where the straight edge line meets the cut wall
-      for (const e of p.edges) { c.beginPath(); c.moveTo(e.x1, e.y1); c.lineTo(e.x1 + e.rx * 4, e.y1 + e.ry * 4); c.stroke(); }
-      c.lineCap = 'butt';
-      // 5) the real pocket is the circle
+      polyPath(c, p.poly); c.fillStyle = CUT_FILL; c.fill();
+    }
+    // 2) the one continuous cushion shadow
+    const fm = mk(), fc = fm.getContext('2d');           // fm = the floor (opaque where there is floor)
+    fc.fillStyle = '#fff'; fc.fillRect(L, T, R - L, B - T);
+    for (const p of POCKETS) { polyPath(fc, p.poly); fc.fill(); fc.beginPath(); fc.arc(p.x, p.y, p.r, 0, Math.PI * 2); fc.fill(); }
+    const sm = mk(), sc = sm.getContext('2d');           // sm = everything that is NOT floor
+    sc.fillStyle = '#000'; sc.fillRect(0, 0, W, H);
+    sc.globalCompositeOperation = 'destination-out'; sc.drawImage(fm, 0, 0);
+    const sh = mk(), shc = sh.getContext('2d');          // sh = soft shadow of that shape, kept only on the floor
+    shc.shadowColor = 'rgba(0,0,0,' + SHADOW_A + ')'; shc.shadowBlur = SHADOW_BLUR; shc.shadowOffsetX = W;
+    shc.drawImage(sm, -W, 0);                            // drawn off-canvas, only its blurred shadow lands here
+    shc.shadowColor = 'transparent'; shc.shadowBlur = 0; shc.shadowOffsetX = 0;
+    shc.globalCompositeOperation = 'destination-in'; shc.drawImage(fm, 0, 0);
+    c.drawImage(sh, 0, 0);
+    // 3) bright cushion edge: along the straight cushions, then on along the cut walls (not across the mouths)
+    const ol = mk(), oc = ol.getContext('2d');
+    oc.strokeStyle = CUSHION_EDGE; oc.lineWidth = 2;
+    oc.beginPath(); oc.moveTo(L, T); oc.lineTo(R, T); oc.lineTo(R, B); oc.lineTo(L, B); oc.closePath(); oc.stroke();
+    oc.fillStyle = '#000'; oc.globalCompositeOperation = 'destination-out';
+    for (const p of POCKETS) { polyPath(oc, p.poly); oc.fill(); }
+    oc.globalCompositeOperation = 'source-over';
+    for (const p of POCKETS) {
+      oc.lineCap = 'butt';
+      for (const e of p.edges) { oc.beginPath(); oc.moveTo(e.x1, e.y1); oc.lineTo(e.x2, e.y2); oc.stroke(); }
+      oc.lineCap = 'round';                              // close the tiny gap where the straight edge line meets the cut wall
+      for (const e of p.edges) { oc.beginPath(); oc.moveTo(e.x1, e.y1); oc.lineTo(e.x1 + e.rx * 4, e.y1 + e.ry * 4); oc.stroke(); }
+    }
+    c.drawImage(ol, 0, 0);
+    c.strokeStyle = 'rgba(255,255,255,0.12)'; c.lineWidth = 2;
+    c.beginPath(); c.moveTo(L + 250, T); c.lineTo(L + 250, B); c.stroke();
+    c.fillStyle = 'rgba(255,255,255,0.25)';
+    for (const sx of [L + 250, L + (R - L) * 0.75]) { c.beginPath(); c.arc(sx, CY, 3, 0, Math.PI * 2); c.fill(); }
+    // 4) the real pocket is the circle
+    for (const p of POCKETS) {
       const hg = c.createRadialGradient(p.x, p.y + p.r * 0.35, p.r * 0.1, p.x, p.y, p.r);
       hg.addColorStop(0, '#000000'); hg.addColorStop(0.55, '#050101'); hg.addColorStop(1, '#4a0505');
       c.fillStyle = hg; c.beginPath(); c.arc(p.x, p.y, p.r, 0, Math.PI * 2); c.fill();
