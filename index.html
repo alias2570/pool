@@ -657,6 +657,16 @@ function renderSphere(out, eq, M) {                  // out: ImageData(RS,RS), e
 /* =====================================================================
    Telegram Mini App setup (safe to call outside Telegram: it does nothing)
    ===================================================================== */
+/* The Telegram user (name etc.).  Tries the Telegram script first; if that script did not load (blocked network) or gave nothing,
+   reads the same data straight from the launch parameters Telegram puts in the page address / session storage.
+   Only available when the game is opened as a Mini App (bot menu button, t.me/bot/app link, web_app button), not as a plain link. */
+function getTelegramUser() {
+  try { const u = window.Telegram.WebApp.initDataUnsafe.user; if (u) return u; } catch (e) {}
+  const fromData = d => { const u = new URLSearchParams(d).get('user'); return u ? JSON.parse(u) : null; };
+  try { const d = new URLSearchParams(location.hash.slice(1)).get('tgWebAppData'); if (d) { const u = fromData(d); if (u) return u; } } catch (e) {}
+  try { const o = JSON.parse(sessionStorage.getItem('__telegram__initParams') || 'null'); if (o && o.tgWebAppData) { const u = fromData(o.tgWebAppData); if (u) return u; } } catch (e) {}
+  return null;
+}
 function initTelegram() {
   const tg = window.Telegram && window.Telegram.WebApp;
   if (!tg) return;
@@ -719,9 +729,9 @@ class Main extends Phaser.Scene {
     this.turnLeft = TURN_TIME;
     this.hud = this.add.graphics().setDepth(9);                                  // bar background, slots, avatars, turn rings (redrawn in refreshHud)
     this.score = [0, 0];
-    const tgUser = (() => { try { return window.Telegram.WebApp.initDataUnsafe.user; } catch (e) { return null; } })();
+    const tgUser = getTelegramUser();
     const clip = n => n.length > 12 ? n.slice(0, 11) + '…' : n;
-    this.names = [clip(tgUser && tgUser.first_name ? tgUser.first_name : 'Player 1'), 'Player 2'];
+    this.names = [clip(tgUser ? (tgUser.first_name || tgUser.username || 'Player 1') : 'Player 1'), 'Player 2'];
     const nf = { fontFamily: 'Arial', fontSize: '20px', color: '#cfe8d6' }, gf = { fontFamily: 'Arial', fontSize: '12px', color: '#8fb39b' };
     this.nameT = [0, 1].map(i => this.add.text(AV_X[i] + (i ? 1 : -1) * 32, BAR_Y - 7, this.names[i], nf).setOrigin(i ? 0 : 1, 0.5).setDepth(11));
     this.groupT = [0, 1].map(i => this.add.text(AV_X[i] + (i ? 1 : -1) * 32, BAR_Y + 12, '', gf).setOrigin(i ? 0 : 1, 0.5).setDepth(11));
