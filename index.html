@@ -675,6 +675,7 @@ function initTelegram() {
    ===================================================================== */
 const SLIDER = { x: 1238, y0: 130, y1: 590 };
 const SPIN = { x: 1238, y: 656, r: 32 };          // cue-ball contact dial (tip position on the ball)
+const AIM_SENS = 1, AIM_MIN_R = 30;               // aiming feel (see setAim)
 const HEAD_X = L + 250;                           // head string (break placement limit)
 
 class Main extends Phaser.Scene {
@@ -847,7 +848,7 @@ class Main extends Phaser.Scene {
     if (p.x > 1200 && p.y < 612) { this.sliding = true; this.setPower(p.y); return; }
     const c = this.sim.balls[0];
     if (this.rules.ballInHand && Math.hypot(p.x - c.x, p.y - c.y) < 28) { this.dragCue = true; return; }
-    this.aiming = true; this.setAim(p);
+    this.aiming = true; this.aimBase = null; this.setAim(p);
   }
   onMove(p) {
     if (!p.isDown) return;
@@ -862,12 +863,20 @@ class Main extends Phaser.Scene {
       if (this.power > 0.04 && this.state === 'aim') this.fire();
       this.power = 0;
     }
-    this.aiming = false; this.spinning = false; this.dragCue = false;
+    this.aiming = false; this.aimBase = null; this.spinning = false; this.dragCue = false;
   }
+  /* Relative aiming: the finger only TURNS the cue by the angle it moves around the cue ball.
+     Touching anywhere (also on the stick) changes nothing by itself; lifting and touching again continues from the
+     current aim.  AIM_SENS = 1 means the stick follows the finger exactly; lower (e.g. 0.5) = finer, slower aiming.
+     AIM_MIN_R: while the finger is closer than this to the cue ball its angle is too jumpy, so it is ignored. */
   setAim(p) {
     const c = this.sim.balls[0];
-    if (Math.hypot(p.x - c.x, p.y - c.y) < 10) return;
-    this.aimAngle = Math.atan2(p.y - c.y, p.x - c.x);
+    if (Math.hypot(p.x - c.x, p.y - c.y) < AIM_MIN_R) return;
+    const a = Math.atan2(p.y - c.y, p.x - c.x);
+    if (!this.aimBase) { this.aimBase = { grab: a, angle: this.aimAngle }; return; }
+    let d = a - this.aimBase.grab;
+    d = Math.atan2(Math.sin(d), Math.cos(d));         // shortest way round, no jump at +-180 degrees
+    this.aimAngle = this.aimBase.angle + d * AIM_SENS;
   }
   setPower(y) {
     this.power = Phaser.Math.Clamp((y - SLIDER.y0) / (SLIDER.y1 - SLIDER.y0), 0, 1);
