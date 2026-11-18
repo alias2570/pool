@@ -683,7 +683,12 @@ function initTelegram() {
 /* =====================================================================
    PART 3 - Phaser scene: rendering, input, sound, turns
    ===================================================================== */
-const SLIDER = { x: 1238, y0: 130, y1: 590 };
+/* Left column (left thumb): settings gear on top, then the power cue.  The cue is the power slider: pull it down to set the power, let go to shoot.
+   SLIDER.y0..y1 = how far the cue tip travels.  GEAR / MENU = settings button and its pop-up panel. */
+const SLIDER = { x: 42, y0: 150, y1: 590, zoneW: 80 };
+const GEAR = { x: 42, y: 82, r: 20 };
+const MENU = { x: 100, y: 66, w: 230, rowH: 46 };
+const CUE_LEN = 520;
 const SPIN = { x: 1238, y: 656, r: 32 };          // cue-ball contact dial (tip position on the ball)
 /* Top bar (one row, y = BAR_Y), left to right:  7 ball slots | name | avatar+turn ring | score + entry | avatar | name | 7 slots.
    Ball slots fill from the outer edge inwards.  Everything is positioned from these numbers. */
@@ -742,12 +747,7 @@ class Main extends Phaser.Scene {
     this.entryT = this.add.text(CX, BAR_Y + 13, ENTRY_LABEL, { fontFamily: 'Arial', fontSize: '14px', fontStyle: 'bold', color: '#ffd166' }).setOrigin(0.5).setDepth(11);
     this.msg = this.add.text(CX, 706, '', { fontFamily: 'Arial', fontSize: '19px', color: '#ffd166' }).setOrigin(0.5).setDepth(10);
     const lf = { fontFamily: 'Arial', fontSize: '13px', color: '#cfe8d6' };
-    this.add.text(SLIDER.x, SLIDER.y0 - 30, 'POWER', lf).setOrigin(0.5).setDepth(10);
     this.add.text(SPIN.x, SPIN.y - SPIN.r - 14, 'SPIN', lf).setOrigin(0.5).setDepth(10);
-
-    const btn = this.add.text(1196, 676, 'RESET', { fontFamily: 'Arial', fontSize: '20px', color: '#fff', backgroundColor: '#2a6b45', padding: { x: 12, y: 6 } })
-      .setOrigin(1, 0).setDepth(10).setInteractive({ useHandCursor: true });
-    btn.on('pointerdown', () => this.startGame());
 
     // debug overlay: knuckles (red), capture circles (yellow), cue-ball centre limits on the cushions (cyan)
     this.showJaws = false;
@@ -764,11 +764,9 @@ class Main extends Phaser.Scene {
       d.lineBetween(L + BR, T + JC, L + BR, B - JC); d.lineBetween(R - BR, T + JC, R - BR, B - JC);
     };
     drawDbg();
-    const jbtn = this.add.text(84, 676, 'JAWS', { fontFamily: 'Arial', fontSize: '20px', color: '#fff', backgroundColor: '#6b2a2a', padding: { x: 12, y: 6 } })
-      .setOrigin(0, 0).setDepth(10).setInteractive({ useHandCursor: true });
-    const toggleJ = () => { this.showJaws = !this.showJaws; drawDbg(); };
-    jbtn.on('pointerdown', toggleJ);
-    if (this.input.keyboard) this.input.keyboard.on('keydown-J', toggleJ);
+    this.toggleJaws = () => { this.showJaws = !this.showJaws; drawDbg(); this.drawMenu(); };
+    if (this.input.keyboard) this.input.keyboard.on('keydown-J', this.toggleJaws);
+    this.buildMenu();
 
     this.input.on('pointerdown', p => this.onDown(p));
     this.input.on('pointermove', p => this.onMove(p));
@@ -882,7 +880,7 @@ class Main extends Phaser.Scene {
     if (this.rules.winner >= 0) {
       this.state = 'over'; this.score[this.rules.winner]++;
       const why = res.reason ? ' (' + res.reason + ')' : '';
-      this.msg.setText(who(this.rules.winner) + ' wins!' + why + '  Press RESET to play again');
+      this.msg.setText(who(this.rules.winner) + ' wins!' + why + '  Tap the gear > New game to play again');
       this.refreshHud(); return;
     }
     let text;
@@ -907,19 +905,23 @@ class Main extends Phaser.Scene {
 
   /* ---------- input ---------- */
   onDown(p) {
+    if (Math.hypot(p.x - GEAR.x, p.y - GEAR.y) <= GEAR.r + 8) { this.toggleMenu(); return; }   // the settings gear works in every state
+    if (this.menuOpen) { this.menuTap(p); return; }                                             // while the panel is open, touches only go to it
     if (this.state !== 'aim' || p.y < 60) return;
     if (Math.hypot(p.x - SPIN.x, p.y - SPIN.y) <= SPIN.r + 10) { this.spinning = true; this.setSpin(p); return; }
-    if (p.x > 1200 && p.y < 612) { this.sliding = true; this.setPower(p.y); return; }
+    if (p.x < SLIDER.zoneW && p.y > 108 && p.y < 668) {              // grab the cue anywhere in the left column: no jump, it moves with the finger from where it is
+      this.sliding = true; this.powerGrab = p.y - (SLIDER.y0 + this.power * (SLIDER.y1 - SLIDER.y0)); return;
+    }
     const c = this.sim.balls[0];
     if (this.rules.ballInHand && Math.hypot(p.x - c.x, p.y - c.y) < 28) { this.dragCue = true; return; }
-    if (p.y > 668) return;                          // bottom band = buttons / message
+    if (p.y > 668) return;                          // bottom band = message only
     this.aiming = true; this.aimBase = null; this.setAim(p);
   }
   onMove(p) {
     if (!p.isDown) return;
     if (this.dragCue) this.placeCue(p.x, p.y);
     else if (this.spinning) this.setSpin(p);
-    else if (this.sliding) this.setPower(p.y);
+    else if (this.sliding) this.setPower(p.y - this.powerGrab);
     else if (this.aiming) this.setAim(p);
   }
   onUp() {
@@ -1017,13 +1019,14 @@ class Main extends Phaser.Scene {
     return true;
   }
   cueSound(power) {                               // cue tip hitting the cue ball: weak or strong sample by shot power
+    if (!this.soundOn) return;
     const strong = power >= 0.4;
     this.playSample(strong ? 'cueStrong' : 'cueWeak', SAMPLE_VOL * (0.45 + 0.55 * power), 0.97 + Math.random() * 0.06);
   }
 
   sfx(kind, v) {
     const ctx = this.sound && this.sound.context;
-    if (!ctx) return;
+    if (!ctx || !this.soundOn) return;
     if (kind === 'pocket' && this.playSample('pocket', SAMPLE_VOL * POCKET_GAIN * (0.9 + Math.random() * 0.1), 0.97 + Math.random() * 0.06)) return;
     if (kind === 'ball' || kind === 'wall') {         // recorded sample first (harder hit = louder), synth is the fallback
       const lo = Math.min(1, Math.pow(Math.max(v, 0) / 1800, 0.6));
@@ -1116,7 +1119,7 @@ class Main extends Phaser.Scene {
   }
   tickSound(urgent) {                              // short dry tick; higher and louder in the last 3 seconds
     const ctx = this.sound && this.sound.context;
-    if (!ctx) return;
+    if (!ctx || !this.soundOn) return;
     const t0 = ctx.currentTime, o = ctx.createOscillator(), g = ctx.createGain();
     o.type = 'square'; o.frequency.value = urgent ? 1900 : 1500;
     g.gain.setValueAtTime(SAMPLE_VOL * (urgent ? 0.16 : 0.1), t0); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.045);
@@ -1208,15 +1211,87 @@ class Main extends Phaser.Scene {
     g.fillPoints([{ x: sx + px * 2.5, y: sy + py * 2.5 }, { x: sx - dx * 8 + px * 2.7, y: sy - dy * 8 + py * 2.7 }, { x: sx - dx * 8 - px * 2.7, y: sy - dy * 8 - py * 2.7 }, { x: sx - px * 2.5, y: sy - py * 2.5 }], true);
   }
 
-  drawSlider() {
+  drawSlider() {                                  // the power slider is a billiard cue; pulled down = more power
     const u = this.ui; u.clear();
-    const { x, y0, y1 } = SLIDER;
-    u.fillStyle(0x16241c, 1); u.fillRoundedRect(x - 8, y0 - 8, 16, y1 - y0 + 16, 8);
+    const { x, y0, y1 } = SLIDER, A = this.state === 'aim' ? 1 : 0.4;
     const hy = y0 + this.power * (y1 - y0);
+    // groove + cue ball the tip points at
+    u.fillStyle(0x0e1812, 0.92 * A); u.fillRoundedRect(x - 12, y0 - 30, 24, y1 - y0 + 52, 12);
+    u.lineStyle(1, 0x2a3d31, A); u.strokeRoundedRect(x - 12, y0 - 30, 24, y1 - y0 + 52, 12);
+    u.fillStyle(0xf6f3ea, A); u.fillCircle(x, y0 - 14, 9);
+    u.fillStyle(0xd9d5c8, A); u.fillCircle(x + 2, y0 - 11, 6);
+    u.fillStyle(0xffffff, 0.9 * A); u.fillCircle(x - 3, y0 - 18, 2.2);
+    // power marks beside the cue: one per 10 %, lit up to the current power
     const col = this.power < 0.5 ? 0x4ade80 : this.power < 0.8 ? 0xfacc15 : 0xef4444;
-    if (this.power > 0) { u.fillStyle(col, 1); u.fillRoundedRect(x - 8, y0 - 8, 16, hy - y0 + 8, 8); }
-    u.fillStyle(0xffffff, this.state === 'aim' ? 0.95 : 0.35); u.fillCircle(x, hy, 18);
-    u.lineStyle(3, col, 1); u.strokeCircle(x, hy, 18);
+    for (let i = 1; i <= 10; i++) {
+      const lit = this.power >= i / 10 - 0.001 && this.power > 0;
+      u.fillStyle(lit ? col : 0x2a3d31, A); u.fillCircle(x + 20, y0 + (y1 - y0) * i / 10, lit ? 3 : 2);
+    }
+    // the cue (tip at the top, butt below; it slides off the bottom of the screen when pulled far)
+    const seg = (t1, h1, t2, h2, color) => {
+      const ya = hy + t1, yb = hy + t2;
+      u.fillStyle(color, A); u.fillPoints([{ x: x - h1, y: ya }, { x: x + h1, y: ya }, { x: x + h2, y: yb }, { x: x - h2, y: yb }], true);
+      u.lineStyle(1.2, 0xffffff, 0.22 * A); u.lineBetween(x - h1 * 0.5, ya, x - h2 * 0.5, yb);      // light edge
+      u.lineStyle(1.2, 0x000000, 0.25 * A); u.lineBetween(x + h1 * 0.6, ya, x + h2 * 0.6, yb);      // shade edge
+    };
+    u.fillStyle(0x3b78c4, A); u.fillCircle(x, hy + 2, 3.2);               // rounded chalked tip
+    seg(2, 3.2, 8, 3.2, 0x3b78c4);                                        // tip
+    seg(8, 3.3, 24, 3.5, 0xf4f1e8);                                       // ivory ferrule
+    seg(24, 3.5, 300, 5.3, 0xecd29a);                                     // maple shaft
+    seg(300, 5.6, 307, 5.6, 0xc9a74a);                                    // brass joint
+    seg(307, 5.8, 352, 6.5, 0x6a3a1e);                                    // upper butt (dark wood)
+    seg(352, 6.6, 432, 7.1, 0x1d1d1f);                                    // linen wrap
+    u.lineStyle(1, 0x6b6b70, 0.45 * A);
+    for (let t = 358; t < 430; t += 6) u.lineBetween(x - 6.8, hy + t, x + 6.8, hy + t + 2);      // wrap threads
+    seg(432, 7.3, 438, 7.3, 0xc9a74a);                                    // brass ring
+    seg(438, 7.3, CUE_LEN - 14, 7.9, 0x7a4426);                           // lower butt
+    u.fillStyle(0xe8d59b, A);
+    for (const t of [458, 480]) u.fillPoints([{ x, y: hy + t - 5 }, { x: x + 3, y: hy + t }, { x, y: hy + t + 5 }, { x: x - 3, y: hy + t }], true);   // inlays
+    seg(CUE_LEN - 14, 7.9, CUE_LEN, 7.9, 0x151515);                       // rubber end
+  }
+
+  /* ---------- settings (gear, top left) ----------
+     Pop-up with: sound on/off (remembered), show the pocket jaws (debug), new game. */
+  buildMenu() {
+    this.menuOpen = false;
+    try { this.soundOn = localStorage.getItem('pool_sound') !== '0'; } catch (e) { this.soundOn = true; }
+    this.gearG = this.add.graphics().setDepth(12);
+    this.menuG = this.add.graphics().setDepth(20);
+    const f = { fontFamily: 'Arial', fontSize: '19px', color: '#e7f3ea' };
+    this.menuT = [0, 1, 2].map(i => this.add.text(MENU.x + 18, MENU.y + 8 + i * MENU.rowH + MENU.rowH / 2, '', f).setOrigin(0, 0.5).setDepth(21).setVisible(false));
+    this.drawMenu();
+  }
+  toggleMenu() { this.menuOpen = !this.menuOpen; this.drawMenu(); }
+  menuTap(p) {
+    const inside = p.x >= MENU.x && p.x <= MENU.x + MENU.w && p.y >= MENU.y && p.y <= MENU.y + 16 + 3 * MENU.rowH;
+    if (!inside) { this.menuOpen = false; this.drawMenu(); return; }
+    const row = Math.floor((p.y - MENU.y - 8) / MENU.rowH);
+    if (row === 0) { this.soundOn = !this.soundOn; try { localStorage.setItem('pool_sound', this.soundOn ? '1' : '0'); } catch (e) {} }
+    else if (row === 1) this.toggleJaws();
+    else if (row === 2) { this.menuOpen = false; this.startGame(); }
+    this.drawMenu();
+  }
+  drawMenu() {
+    const g = this.gearG; g.clear();
+    const { x, y, r } = GEAR, open = this.menuOpen;
+    g.fillStyle(0x16241c, 0.92); g.fillCircle(x, y, r); g.lineStyle(2, open ? 0x4ade80 : 0x2a3d31, 1); g.strokeCircle(x, y, r);
+    g.fillStyle(0xcfe8d6, 1); g.fillCircle(x, y, 7.5);                                          // gear: body, 8 teeth, hole
+    for (let k = 0; k < 8; k++) {
+      const a = k * Math.PI / 4, c = Math.cos(a), s = Math.sin(a), px = -s * 2.6, py = c * 2.6;
+      g.fillPoints([{ x: x + c * 6 + px, y: y + s * 6 + py }, { x: x + c * 11.5 + px, y: y + s * 11.5 + py }, { x: x + c * 11.5 - px, y: y + s * 11.5 - py }, { x: x + c * 6 - px, y: y + s * 6 - py }], true);
+    }
+    g.fillStyle(0x16241c, 1); g.fillCircle(x, y, 3.6);
+    const m = this.menuG; m.clear();
+    this.menuT.forEach(t => t.setVisible(open));
+    if (!open) return;
+    const h = 16 + 3 * MENU.rowH;
+    m.fillStyle(0x16241c, 0.97); m.fillRoundedRect(MENU.x, MENU.y, MENU.w, h, 14);
+    m.lineStyle(2, 0x2a3d31, 1); m.strokeRoundedRect(MENU.x, MENU.y, MENU.w, h, 14);
+    m.lineStyle(1, 0x2a3d31, 1);
+    for (let i = 1; i < 3; i++) m.lineBetween(MENU.x + 12, MENU.y + 8 + i * MENU.rowH, MENU.x + MENU.w - 12, MENU.y + 8 + i * MENU.rowH);
+    this.menuT[0].setText('Sound: ' + (this.soundOn ? 'ON' : 'OFF')).setColor(this.soundOn ? '#e7f3ea' : '#8fb39b');
+    this.menuT[1].setText('Show jaws: ' + (this.showJaws ? 'ON' : 'OFF'));
+    this.menuT[2].setText('New game').setColor('#ffd166');
   }
 
   drawSpin() {                                    // drawn on the same graphics object, after the slider
