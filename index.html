@@ -736,6 +736,8 @@ class Main extends Phaser.Scene {
     this.nameT = [0, 1].map(i => this.add.text(AV_X[i] + (i ? 1 : -1) * 32, BAR_Y - 7, this.names[i], nf).setOrigin(i ? 0 : 1, 0.5).setDepth(11));
     this.groupT = [0, 1].map(i => this.add.text(AV_X[i] + (i ? 1 : -1) * 32, BAR_Y + 12, '', gf).setOrigin(i ? 0 : 1, 0.5).setDepth(11));
     this.letterT = [0, 1].map(i => this.add.text(AV_X[i], BAR_Y, this.names[i].charAt(0).toUpperCase(), { fontFamily: 'Arial', fontSize: '22px', fontStyle: 'bold', color: '#fff' }).setOrigin(0.5).setDepth(11));
+    this.avImg = [null, null];
+    if (tgUser && tgUser.photo_url) this.loadAvatar(0, tgUser.photo_url);      // profile photo replaces the letter when it loads
     this.scoreT = this.add.text(CX, BAR_Y - 8, '0 - 0', { fontFamily: 'Arial', fontSize: '24px', fontStyle: 'bold', color: '#fff' }).setOrigin(0.5).setDepth(11);
     this.entryT = this.add.text(CX, BAR_Y + 13, ENTRY_LABEL, { fontFamily: 'Arial', fontSize: '14px', fontStyle: 'bold', color: '#ffd166' }).setOrigin(0.5).setDepth(11);
     this.msg = this.add.text(CX, 706, '', { fontFamily: 'Arial', fontSize: '19px', color: '#ffd166' }).setOrigin(0.5).setDepth(10);
@@ -823,9 +825,33 @@ class Main extends Phaser.Scene {
       this.nameT[i].setColor(cur ? '#ffd166' : '#8fb39b');
       this.groupT[i].setText(gname(this.rules.groups[i]));
       this.letterT[i].setAlpha(cur ? 1 : 0.7);
+      if (this.avImg[i]) this.avImg[i].setAlpha(cur ? 1 : 0.6);
     }
     this.scoreT.setText(this.score[0] + ' - ' + this.score[1]);
     this.layoutTrays();
+  }
+
+  /* Profile photo: loaded as a normal image, cropped to a circle and drawn over the letter avatar.
+     If it cannot be loaded (no permission / blocked by the server's CORS rules) nothing happens and the letter stays. */
+  loadAvatar(i, url) {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      try {
+        const S = 96, side = Math.min(img.naturalWidth || S, img.naturalHeight || S) || S;
+        const key = 'avatar' + i + '_' + Date.now();
+        const t = this.textures.createCanvas(key, S, S), c = t.getContext();
+        c.beginPath(); c.arc(S / 2, S / 2, S / 2, 0, Math.PI * 2); c.clip();
+        c.drawImage(img, ((img.naturalWidth || S) - side) / 2, ((img.naturalHeight || S) - side) / 2, side, side, 0, 0, S, S);   // centre square crop
+        t.refresh();
+        if (this.avImg[i]) this.avImg[i].destroy();
+        this.avImg[i] = this.add.image(AV_X[i], BAR_Y, key).setDisplaySize(AV_R * 2, AV_R * 2).setDepth(11);
+        this.letterT[i].setVisible(false);
+        this.refreshHud();
+      } catch (e) {}
+    };
+    img.onerror = () => {};
+    img.src = url;
   }
 
   layoutTrays() {                                  // potted balls go into the slots of the player whose group they belong to
