@@ -675,6 +675,11 @@ function initTelegram() {
    ===================================================================== */
 const SLIDER = { x: 1238, y0: 130, y1: 590 };
 const SPIN = { x: 1238, y: 656, r: 32 };          // cue-ball contact dial (tip position on the ball)
+/* Top bar (one row, y = BAR_Y), left to right:  7 ball slots | name | avatar+turn ring | score + entry | avatar | name | 7 slots.
+   Ball slots fill from the outer edge inwards.  Everything is positioned from these numbers. */
+const BAR_Y = 28, SLOT_D = 22, SLOT_DX = 26, SLOT0 = 96, SLOT1 = 1184;   // slot size, spacing, first-slot centre of player 1 / player 2
+const AV_X = [470, 810], AV_R = 19, AV_COL = [0x2f6fdb, 0xd9822b];       // avatar centres, radius, colours
+const ENTRY_LABEL = 'FREE';                                              // league entry shown under the score (placeholder until leagues exist)
 const AIM_SENS = 1, AIM_MIN_R = 30;               // aiming feel (see setAim)
 const HEAD_X = L + 250;                           // head string (break placement limit)
 
@@ -709,15 +714,23 @@ class Main extends Phaser.Scene {
     this.g = this.add.graphics().setDepth(5);
     this.ui = this.add.graphics().setDepth(10);
 
-    const f = { fontFamily: 'Arial', fontSize: '20px', color: '#cfe8d6' };
-    this.p1Text = this.add.text(84, 16, '', f).setDepth(10);
-    this.p2Text = this.add.text(430, 16, '', f).setDepth(10);
+    this.hud = this.add.graphics().setDepth(9);                                  // bar background, slots, avatars, turn rings (redrawn in refreshHud)
+    this.score = [0, 0];
+    const tgUser = (() => { try { return window.Telegram.WebApp.initDataUnsafe.user; } catch (e) { return null; } })();
+    const clip = n => n.length > 12 ? n.slice(0, 11) + '…' : n;
+    this.names = [clip(tgUser && tgUser.first_name ? tgUser.first_name : 'Player 1'), 'Player 2'];
+    const nf = { fontFamily: 'Arial', fontSize: '20px', color: '#cfe8d6' }, gf = { fontFamily: 'Arial', fontSize: '12px', color: '#8fb39b' };
+    this.nameT = [0, 1].map(i => this.add.text(AV_X[i] + (i ? 1 : -1) * 32, BAR_Y - 7, this.names[i], nf).setOrigin(i ? 0 : 1, 0.5).setDepth(11));
+    this.groupT = [0, 1].map(i => this.add.text(AV_X[i] + (i ? 1 : -1) * 32, BAR_Y + 12, '', gf).setOrigin(i ? 0 : 1, 0.5).setDepth(11));
+    this.letterT = [0, 1].map(i => this.add.text(AV_X[i], BAR_Y, this.names[i].charAt(0).toUpperCase(), { fontFamily: 'Arial', fontSize: '22px', fontStyle: 'bold', color: '#fff' }).setOrigin(0.5).setDepth(11));
+    this.scoreT = this.add.text(CX, BAR_Y - 8, '0 - 0', { fontFamily: 'Arial', fontSize: '24px', fontStyle: 'bold', color: '#fff' }).setOrigin(0.5).setDepth(11);
+    this.entryT = this.add.text(CX, BAR_Y + 13, ENTRY_LABEL, { fontFamily: 'Arial', fontSize: '14px', fontStyle: 'bold', color: '#ffd166' }).setOrigin(0.5).setDepth(11);
     this.msg = this.add.text(CX, 706, '', { fontFamily: 'Arial', fontSize: '19px', color: '#ffd166' }).setOrigin(0.5).setDepth(10);
     const lf = { fontFamily: 'Arial', fontSize: '13px', color: '#cfe8d6' };
     this.add.text(SLIDER.x, SLIDER.y0 - 30, 'POWER', lf).setOrigin(0.5).setDepth(10);
     this.add.text(SPIN.x, SPIN.y - SPIN.r - 14, 'SPIN', lf).setOrigin(0.5).setDepth(10);
 
-    const btn = this.add.text(1196, 18, 'RESET', { fontFamily: 'Arial', fontSize: '20px', color: '#fff', backgroundColor: '#2a6b45', padding: { x: 12, y: 6 } })
+    const btn = this.add.text(1196, 676, 'RESET', { fontFamily: 'Arial', fontSize: '20px', color: '#fff', backgroundColor: '#2a6b45', padding: { x: 12, y: 6 } })
       .setOrigin(1, 0).setDepth(10).setInteractive({ useHandCursor: true });
     btn.on('pointerdown', () => this.startGame());
 
@@ -736,8 +749,8 @@ class Main extends Phaser.Scene {
       d.lineBetween(L + BR, T + JC, L + BR, B - JC); d.lineBetween(R - BR, T + JC, R - BR, B - JC);
     };
     drawDbg();
-    const jbtn = this.add.text(1090, 18, 'JAWS', { fontFamily: 'Arial', fontSize: '20px', color: '#fff', backgroundColor: '#6b2a2a', padding: { x: 12, y: 6 } })
-      .setOrigin(1, 0).setDepth(10).setInteractive({ useHandCursor: true });
+    const jbtn = this.add.text(84, 676, 'JAWS', { fontFamily: 'Arial', fontSize: '20px', color: '#fff', backgroundColor: '#6b2a2a', padding: { x: 12, y: 6 } })
+      .setOrigin(0, 0).setDepth(10).setInteractive({ useHandCursor: true });
     const toggleJ = () => { this.showJaws = !this.showJaws; drawDbg(); };
     jbtn.on('pointerdown', toggleJ);
     if (this.input.keyboard) this.input.keyboard.on('keydown-J', toggleJ);
@@ -779,27 +792,39 @@ class Main extends Phaser.Scene {
   }
 
   refreshHud() {
-    const name = g => g === 'solid' ? 'Solids' : g === 'stripe' ? 'Stripes' : 'Open';
-    [this.p1Text, this.p2Text].forEach((t, i) => {
+    const gname = g => g === 'solid' ? 'Solids' : g === 'stripe' ? 'Stripes' : 'Open table';
+    const h = this.hud; h.clear();
+    for (const [x, w] of [[84, 190], [1006, 190]]) {                              // the two ball trays
+      h.fillStyle(0x16241c, 0.9); h.fillRoundedRect(x, BAR_Y - 17, w, 34, 17);
+    }
+    h.fillStyle(0x16241c, 0.9); h.fillRoundedRect(CX - 120, BAR_Y - 21, 240, 42, 14);   // score / entry panel
+    for (let i = 0; i < 7; i++) {                                                  // seven empty slots per player
+      for (const x of [SLOT0 + i * SLOT_DX, SLOT1 - i * SLOT_DX]) {
+        h.fillStyle(0x0b130f, 1); h.fillCircle(x, BAR_Y, SLOT_D / 2); h.lineStyle(1, 0x2a3d31, 1); h.strokeCircle(x, BAR_Y, SLOT_D / 2);
+      }
+    }
+    for (let i = 0; i < 2; i++) {                                                  // avatar + turn ring
       const cur = this.rules.turn === i && this.rules.winner < 0;
-      t.setText((cur ? '▶ ' : '') + 'Player ' + (i + 1) + ' · ' + name(this.rules.groups[i]));
-      t.setColor(cur ? '#ffd166' : '#8fb39b');
-    });
+      h.fillStyle(AV_COL[i], cur ? 1 : 0.55); h.fillCircle(AV_X[i], BAR_Y, AV_R);
+      h.lineStyle(3, cur ? 0x4ade80 : 0x2a3d31, 1); h.strokeCircle(AV_X[i], BAR_Y, AV_R + 4);
+      this.nameT[i].setColor(cur ? '#ffd166' : '#8fb39b');
+      this.groupT[i].setText(gname(this.rules.groups[i]));
+      this.letterT[i].setAlpha(cur ? 1 : 0.7);
+    }
+    this.scoreT.setText(this.score[0] + ' - ' + this.score[1]);
     this.layoutTrays();
   }
 
-  layoutTrays() {
-    const lists = [[], [], []];
+  layoutTrays() {                                  // potted balls go into the slots of the player whose group they belong to
+    const lists = [[], []], g = this.rules.groups;
     for (const n of this.potted) {
-      let idx = 2;
-      const g = Rules.groupOf(n);
-      if (n !== 8 && this.rules.groups[0]) idx = g === this.rules.groups[0] ? 0 : 1;
-      lists[idx].push(n);
+      const img = this.trayImgs[n];
+      if (!img) continue;
+      if (n === 8 || !g[0]) { img.setVisible(false); continue; }                   // table still open (or the 8-ball): not shown in a tray
+      lists[Rules.groupOf(n) === g[0] ? 0 : 1].push(n);
     }
-    const Y = 683;
-    lists[0].forEach((n, i) => this.trayImgs[n].setPosition(100 + i * 22, Y));
-    lists[1].forEach((n, i) => this.trayImgs[n].setPosition(1180 - i * 22, Y));
-    lists[2].forEach((n, i) => this.trayImgs[n].setPosition(CX + (i - (lists[2].length - 1) / 2) * 22, Y));
+    lists[0].forEach((n, i) => this.trayImgs[n].setVisible(true).setPosition(SLOT0 + i * SLOT_DX, BAR_Y));
+    lists[1].forEach((n, i) => this.trayImgs[n].setVisible(true).setPosition(SLOT1 - i * SLOT_DX, BAR_Y));
   }
 
   finishShot() {
@@ -816,7 +841,7 @@ class Main extends Phaser.Scene {
       return;
     }
     if (this.rules.winner >= 0) {
-      this.state = 'over';
+      this.state = 'over'; this.score[this.rules.winner]++;
       const why = res.reason ? ' (' + res.reason + ')' : '';
       this.msg.setText(who(this.rules.winner) + ' wins!' + why + '  Press RESET to play again');
       this.refreshHud(); return;
@@ -848,6 +873,7 @@ class Main extends Phaser.Scene {
     if (p.x > 1200 && p.y < 612) { this.sliding = true; this.setPower(p.y); return; }
     const c = this.sim.balls[0];
     if (this.rules.ballInHand && Math.hypot(p.x - c.x, p.y - c.y) < 28) { this.dragCue = true; return; }
+    if (p.y > 668) return;                          // bottom band = buttons / message
     this.aiming = true; this.aimBase = null; this.setAim(p);
   }
   onMove(p) {
@@ -1003,7 +1029,7 @@ class Main extends Phaser.Scene {
     this.tweens.add({ targets: [s.ball, s.shine, s.shadow], x: p.x, y: p.y, scale: 0, duration: 160 });
     if (b.n !== 0) {
       this.potted.push(b.n);
-      this.trayImgs[b.n] = this.add.image(0, 0, 'ball' + b.n).setDepth(6).setDisplaySize(20, 20);
+      this.trayImgs[b.n] = this.add.image(0, 0, 'ball' + b.n).setDepth(11).setDisplaySize(SLOT_D, SLOT_D);
       this.layoutTrays();
     }
   }
