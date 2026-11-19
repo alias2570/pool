@@ -230,6 +230,7 @@ this.balls.push({
       let sliding = false;
       if (b.n === 0) {
         b.w *= 1 - SPIN_DECAY * dt;
+        if (b.vx === 0 && b.vy === 0) { b.w *= 1 - 12 * dt; if (Math.abs(b.w) < 3) b.w = 0; }   // ball at rest: side spin dies out fast (no endless spinning in place)
         const ux = b.vx - b.rvx, uy = b.vy - b.rvy, um = Math.hypot(ux, uy);
         if (um > 8) {                           // skidding on the cloth: friction pulls v and roll together
           sliding = true;
