@@ -756,7 +756,7 @@ const BAR_Y = 28, SLOT_D = 22, SLOT_DX = 26, SLOT0 = 96, SLOT1 = 1184;   // slot
 const AV_X = [470, 810], AV_R = 19, AV_COL = [0x2f6fdb, 0xd9822b];       // avatar centres, radius, colours
 const TURN_TIME = 30, TURN_WARN = 8;                                      // seconds per turn; the ring turns red and ticks during the last TURN_WARN seconds
 const ENTRY_LABEL = 'FREE';                                              // league entry shown under the score (placeholder until leagues exist)
-const AIM_SENS = 1, AIM_MIN_R = 30;               // aiming feel (see setAim)
+const AIM_SENS = 0.5, AIM_MIN_R = 30, AIM_REF_R = 350;               // aiming feel (see setAim)
 const HEAD_X = L + 250;                           // head string (break placement limit)
 
 class Main extends Phaser.Scene {
@@ -999,16 +999,18 @@ class Main extends Phaser.Scene {
   }
   /* Relative aiming: the finger only TURNS the cue by the angle it moves around the cue ball.
      Touching anywhere (also on the stick) changes nothing by itself; lifting and touching again continues from the
-     current aim.  AIM_SENS = 1 means the stick follows the finger exactly; lower (e.g. 0.5) = finer, slower aiming.
+     current aim.  AIM_SENS = 1 means the stick follows the finger exactly; 0.5 = half as fast (finer). Close to the ball it is slowed further (AIM_REF_R).
      AIM_MIN_R: while the finger is closer than this to the cue ball its angle is too jumpy, so it is ignored. */
   setAim(p) {
     const c = this.sim.balls[0];
     if (Math.hypot(p.x - c.x, p.y - c.y) < AIM_MIN_R) return;
-    const a = Math.atan2(p.y - c.y, p.x - c.x);
-    if (!this.aimBase) { this.aimBase = { grab: a, angle: this.aimAngle }; return; }
-    let d = a - this.aimBase.grab;
+    const dist = Math.hypot(p.x - c.x, p.y - c.y), a = Math.atan2(p.y - c.y, p.x - c.x);
+    if (!this.aimBase) { this.aimBase = { last: a }; return; }
+    let d = a - this.aimBase.last;
     d = Math.atan2(Math.sin(d), Math.cos(d));         // shortest way round, no jump at +-180 degrees
-    this.aimAngle = this.aimBase.angle + d * AIM_SENS;
+    this.aimBase.last = a;
+    // finer aiming: a finger closer than AIM_REF_R to the cue ball turns the stick even slower (its angle changes faster per pixel)
+    this.aimAngle += d * AIM_SENS * Math.min(1, dist / AIM_REF_R);
   }
   setPower(y) {
     this.power = Phaser.Math.Clamp((y - SLIDER.y0) / (SLIDER.y1 - SLIDER.y0), 0, 1);
