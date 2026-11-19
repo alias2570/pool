@@ -508,11 +508,47 @@ function buildTextures(scene) {
   if (!tx.exists('table')) {
     const t = tx.createCanvas('table', W, H), c = t.getContext();
     c.fillStyle = '#0b130f'; c.fillRect(0, 0, W, H);
-    let g = c.createLinearGradient(0, T - 56, 0, B + 56);
-    g.addColorStop(0, '#7a4a24'); g.addColorStop(0.5, '#5a3318'); g.addColorStop(1, '#3f230f');
-    c.fillStyle = g; rr(c, L - 56, T - 56, R - L + 112, B - T + 112, 34); c.fill();
-    c.strokeStyle = 'rgba(255,220,170,0.25)'; c.lineWidth = 2;
-    rr(c, L - 54, T - 54, R - L + 108, B - T + 108, 32); c.stroke();
+    /* ---- FRAME: black lacquer + brushed gold (only the border; cloth, cushions, pockets and the ball rail are untouched) ----
+       Outer size is exactly the old wood frame.  Tuning: GOLD_* = gold colours, LACQ = lacquer gradient stops. */
+    const FX0 = L - 56, FY0 = T - 56, FW = R - L + 112, FH = B - T + 112, PLATE = 6;
+    const GOLD_HI = '#f6e3a1', GOLD_MID = '#c8a24a', GOLD_LO = '#7a5a1c', GOLD_DK = '#4a3410';
+    const goldG = (x0, y0, x1, y1) => { const q = c.createLinearGradient(x0, y0, x1, y1); q.addColorStop(0, GOLD_HI); q.addColorStop(0.3, GOLD_MID); q.addColorStop(0.55, GOLD_HI); q.addColorStop(0.8, GOLD_LO); q.addColorStop(1, GOLD_MID); return q; };
+    // 1) gold plate (outer trim), with a soft drop shadow on the dark background
+    c.save(); c.shadowColor = 'rgba(0,0,0,0.85)'; c.shadowBlur = 14; c.shadowOffsetY = 3;
+    c.fillStyle = goldG(FX0, FY0, FX0 + FW, FY0 + FH); rr(c, FX0, FY0, FW, FH, 34); c.fill(); c.restore();
+    // brushed hairlines on the plate (the lacquer is painted over the inner part afterwards)
+    c.save(); rr(c, FX0, FY0, FW, FH, 34); c.clip();
+    let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    c.lineWidth = 1;
+    for (let y = FY0; y < FY0 + FH; y++) { c.strokeStyle = (rnd() < 0.5 ? 'rgba(255,244,200,' : 'rgba(60,40,8,') + (0.05 + rnd() * 0.12).toFixed(3) + ')'; c.beginPath(); c.moveTo(FX0, y + 0.5); c.lineTo(FX0 + FW, y + 0.5); c.stroke(); }
+    c.restore();
+    // 2) black lacquer inset by PLATE px, with a glossy diagonal sheen
+    const IX = FX0 + PLATE, IY = FY0 + PLATE, IW = FW - 2 * PLATE, IH = FH - 2 * PLATE;
+    let g = c.createLinearGradient(0, IY, 0, IY + IH);
+    g.addColorStop(0, '#1b1b22'); g.addColorStop(0.5, '#0c0c10'); g.addColorStop(1, '#040406');
+    c.fillStyle = g; rr(c, IX, IY, IW, IH, 28); c.fill();
+    c.save(); rr(c, IX, IY, IW, IH, 28); c.clip();
+    g = c.createLinearGradient(IX, IY, IX + IW * 0.55, IY + IH * 1.6);
+    g.addColorStop(0, 'rgba(255,255,255,0.20)'); g.addColorStop(0.35, 'rgba(255,255,255,0.04)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+    c.fillStyle = g; c.fillRect(IX, IY, IW, IH);
+    // 3) fine engraved pattern: two interlaced gold waves along the straight parts of the band
+    c.lineWidth = 1; c.lineCap = 'round'; c.strokeStyle = 'rgba(214,176,86,0.45)';
+    const wave = (x0, y0, x1, y1, ph) => {
+      const len = Math.hypot(x1 - x0, y1 - y0), dx = (x1 - x0) / len, dy = (y1 - y0) / len, nx = -dy, ny = dx;
+      c.beginPath();
+      for (let u = 0; u <= len; u += 2) { const a = Math.sin(u / 9 + ph) * 4.2; c.lineTo(x0 + dx * u + nx * a, y0 + dy * u + ny * a); }
+      c.stroke();
+    };
+    for (const ph of [0, Math.PI]) {
+      wave(L + 50, T - 40, R - 50, T - 40, ph); wave(L + 50, B + 40, R - 50, B + 40, ph);
+      wave(L - 40, T + 50, L - 40, B - 50, ph); wave(R + 40, T + 50, R + 40, B - 50, ph);
+    }
+    c.restore();
+    // 4) edge details: dark groove under the plate, bright highlight on the outer edge, gold inlay line next to the cushions
+    c.strokeStyle = GOLD_DK; c.lineWidth = 1.2; rr(c, IX + 0.5, IY + 0.5, IW - 1, IH - 1, 27.5); c.stroke();
+    c.strokeStyle = 'rgba(255,248,215,0.75)'; c.lineWidth = 1.2; rr(c, FX0 + 0.8, FY0 + 0.8, FW - 1.6, FH - 1.6, 33.2); c.stroke();
+    c.strokeStyle = goldG(L, T - 30, R, B + 30); c.lineWidth = 2.4; rr(c, L - 29, T - 29, R - L + 58, B - T + 58, 18); c.stroke();
+    c.strokeStyle = 'rgba(0,0,0,0.55)'; c.lineWidth = 1; rr(c, L - 27.2, T - 27.2, R - L + 54.4, B - T + 54.4, 16.5); c.stroke();
     /* cushions: darker base, a lighter face next to the playfield, a bright edge line and a soft shadow on the cloth
        (colours are easy to change: CUSHION_BASE / CUSHION_FACE / CUSHION_EDGE) */
     const CUSHION_BASE = '#0f4a2a', CUSHION_FACE = '#18733c', CUSHION_EDGE = '#4be07a', FACE_W = 10;
@@ -578,10 +614,26 @@ function buildTextures(scene) {
       hg.addColorStop(0, '#000000'); hg.addColorStop(0.55, '#050101'); hg.addColorStop(1, '#4a0505');
       c.fillStyle = hg; c.beginPath(); c.arc(p.x, p.y, p.r, 0, Math.PI * 2); c.fill();
     }
-    c.fillStyle = '#e8dcc0';
-    const dia = (x, y) => { c.beginPath(); c.moveTo(x, y - 5); c.lineTo(x + 5, y); c.lineTo(x, y + 5); c.lineTo(x - 5, y); c.closePath(); c.fill(); };
-    for (let i = 1; i < 8; i++) { if (i === 4) continue; const x = L + (R - L) * i / 8; dia(x, T - 40); dia(x, B + 40); }
-    for (let i = 1; i < 4; i++) { const y = T + (B - T) * i / 4; dia(L - 40, y); dia(R + 40, y); }
+    /* gold sights (small coins) + engraved coin medallions on the frame (generic hexagon coin, no real brand symbols) */
+    const sight = (x, y) => {
+      let q = c.createRadialGradient(x - 1.5, y - 1.5, 0.5, x, y, 5.5); q.addColorStop(0, GOLD_HI); q.addColorStop(0.6, GOLD_MID); q.addColorStop(1, GOLD_LO);
+      c.fillStyle = q; c.beginPath(); c.arc(x, y, 5, 0, Math.PI * 2); c.fill();
+      c.strokeStyle = GOLD_DK; c.lineWidth = 1; c.stroke();
+    };
+    const medal = (x, y) => {
+      c.fillStyle = '#000'; c.beginPath(); c.arc(x, y, 13.5, 0, Math.PI * 2); c.fill();                       // dark seat
+      let q = c.createLinearGradient(x - 12, y - 12, x + 12, y + 12); q.addColorStop(0, GOLD_HI); q.addColorStop(0.5, GOLD_MID); q.addColorStop(1, GOLD_LO);
+      c.fillStyle = q; c.beginPath(); c.arc(x, y, 12, 0, Math.PI * 2); c.fill();
+      c.strokeStyle = GOLD_DK; c.lineWidth = 1; c.beginPath(); c.arc(x, y, 12, 0, Math.PI * 2); c.stroke();
+      c.strokeStyle = 'rgba(74,52,16,0.9)'; c.lineWidth = 1; c.beginPath(); c.arc(x, y, 9.4, 0, Math.PI * 2); c.stroke();   // milled edge ring
+      c.beginPath(); for (let k = 0; k < 6; k++) { const a = Math.PI / 6 + k * Math.PI / 3; c.lineTo(x + Math.cos(a) * 6.2, y + Math.sin(a) * 6.2); } c.closePath();
+      c.fillStyle = 'rgba(74,52,16,0.35)'; c.fill(); c.strokeStyle = GOLD_DK; c.lineWidth = 1.2; c.stroke();                // engraved hexagon
+      c.fillStyle = GOLD_HI; c.beginPath(); c.arc(x, y, 1.8, 0, Math.PI * 2); c.fill();                                      // centre dot
+    };
+    for (let i = 1; i < 8; i++) { if (i === 4) continue; const x = L + (R - L) * i / 8; sight(x, T - 40); sight(x, B + 40); }
+    for (const y of [T + (B - T) * 0.25, T + (B - T) * 0.75]) { sight(L - 40, y); sight(R + 40, y); }
+    for (const x of [L + 80, CX - 85, CX + 85, R - 80]) { medal(x, T - 40); medal(x, B + 40); }
+    medal(L - 40, CY); medal(R + 40, CY);
     t.refresh();
   }
 }
