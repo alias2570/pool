@@ -27,6 +27,7 @@
 const W = 1280, H = 720;
 const L = 140, T = 110, R = 1140, B = 610;      // cushion surface (play area)
 const CX = (L + R) / 2, CY = (T + B) / 2;
+function mkHoleMask(scene, p) { const g = scene.make.graphics({ x: 0, y: 0, add: false }); g.fillStyle(0xffffff, 1); g.fillCircle(p.x, p.y, p.r); return g.createGeometryMask(); }
 const BR = 14.706;                                   // ball radius
 /* ---- Pocket geometry (all sizes are multiples of the ball diameter DB) ----
    CORNER pockets: a straight channel. Both walls are parallel to the pocket axis (45 deg to the rail),
@@ -1306,14 +1307,21 @@ class Main extends Phaser.Scene {
     for (let k = 1; k < 16; k += 3) { const y = R.slot0 - k * R.dy + R.dy / 2; if (y > ty1 + 14) { g.fillCircle(cx - hw - wl / 2, y, 1.7); g.fillCircle(cx + hw + wl / 2, y, 1.7); } }
     g.fillCircle(cx - hw - wl / 2, iy1 + wl / 2, 1.7); g.fillCircle(cx + hw + wl / 2, iy1 + wl / 2, 1.7);
   }
-  fall(s, p, done) {                               // the ball keeps rolling through the pocket and slips under the table (hidden by the mask, no fading / shrinking)
+  fall(s, p, done) {                               // the ball rolls into the hole, then slips under the table toward the INSIDE of the table (hidden by the hole-circle mask, no fading / shrinking)
+    const T = RAIL_TIME, objs = [s.ball, s.shine, s.shadow];
     let dx = p.x - s.ball.x, dy = p.y - s.ball.y;
-    const d = Math.hypot(dx, dy) || 1, run = d + p.r + BR + 4, T = RAIL_TIME;
-    dx /= d; dy /= d;
-    const objs = [s.ball, s.shine, s.shadow];
+    const d = Math.hypot(dx, dy);
+    let ix = 640 - p.x, iy = 360 - p.y; const il = Math.hypot(ix, iy) || 1; ix /= il; iy /= il;   // inward = toward the table centre
+    const run = p.r + BR + 4;
+    if (!p.holeMask) p.holeMask = mkHoleMask(this, p);
     objs.forEach(o => o.setMask(this.fallMask));
-    this.tweens.add({ targets: objs, x: '+=' + dx * run, y: '+=' + dy * run, duration: run / 0.22 * T, ease: 'Quad.easeIn',
-      onComplete: () => { objs.forEach(o => { o.setVisible(false); o.clearMask(); }); if (done) done(); } });
+    const finish = () => { objs.forEach(o => { o.setVisible(false); o.clearMask(); }); if (done) done(); };
+    const phase2 = () => {
+      objs.forEach(o => o.setMask(p.holeMask));
+      this.tweens.add({ targets: objs, x: '+=' + ix * run, y: '+=' + iy * run, duration: run / 0.16 * T, ease: 'Quad.easeIn', onComplete: finish });
+    };
+    if (d < 1) phase2();
+    else this.tweens.add({ targets: objs, x: '+=' + dx, y: '+=' + dy, duration: d / 0.22 * T, ease: 'Quad.easeIn', onComplete: phase2 });
   }
   railDrop(b, p) {                                 // after the fall the ball travels under the table and comes out of the tube (same size), then rolls down to its place
     const s = this.spr[this.sim.balls.indexOf(b)], R = RAIL, T = RAIL_TIME, objs = [s.ball, s.shine];
