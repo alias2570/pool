@@ -14,7 +14,7 @@
     #game{position:fixed;left:0;top:0;width:100vh;width:100dvh;height:100vw;height:100dvw;transform-origin:0 0;transform:translateX(100vw) rotate(90deg)}
   }
 </style>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script async src="https://telegram.org/js/telegram-web-app.js" onload="window.__tgReady && window.__tgReady()"></script>   <!-- async: if telegram.org is slow or blocked it must not hold up the game -->
 <script src="phaser.min.js"></script>
 </head>
 <body>
@@ -733,6 +733,7 @@ const BOT_LEVELS = [
   { name: 'Expert',    sigma: 0.1,  pw: 0.04, cands: 14, think: [1.6, 3.2], breakP: 0.97 }
 ];
 const BOT_AVATARS = 14;
+const MATCH_FLIPS = [9, 13], MATCH_HOLD = 1000;   // matchmaking screen: number of card flips (min, max) and how long the found opponent stays (ms)
 const gauss = () => { let u = 0; while (!u) u = Math.random(); const v = Math.random(); return Math.max(-2.5, Math.min(2.5, Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v))); };
 const rand = (a, b) => a + Math.random() * (b - a);
 function segDist(px, py, x1, y1, x2, y2) {
@@ -869,6 +870,14 @@ class Main extends Phaser.Scene {
     const clip = n => n.length > 12 ? n.slice(0, 11) + '…' : n;
     this.names = [clip(tgUser ? (tgUser.first_name || tgUser.username || 'Player 1') : 'Player 1'), 'Player 2'];
     this.drawUserCard(null);
+    this._userSet = !!tgUser;
+    window.__tgReady = () => {                       // the Telegram script arrived after the game started: pick up the user then
+      initTelegram();
+      const u = getTelegramUser(); if (!u || this._userSet) return; this._userSet = true;
+      this.names[0] = clip(u.first_name || u.username || 'Player 1');
+      this.nameT[0].setText(this.names[0]); this.letterT[0].setText(this.names[0].charAt(0).toUpperCase()); this.drawUserCard(null);
+      if (u.photo_url) this.loadAvatar(0, u.photo_url);
+    };
     const nf = { fontFamily: 'Arial', fontSize: '20px', color: '#cfe8d6' }, gf = { fontFamily: 'Arial', fontSize: '12px', color: '#8fb39b' };
     this.nameT = [0, 1].map(i => this.add.text(AV_X[i] + (i ? 1 : -1) * 32, BAR_Y - 7, this.names[i], nf).setOrigin(i ? 0 : 1, 0.5).setDepth(11));
     this.groupT = [0, 1].map(i => this.add.text(AV_X[i] + (i ? 1 : -1) * 32, BAR_Y + 12, '', gf).setOrigin(i ? 0 : 1, 0.5).setDepth(11));
@@ -996,11 +1005,11 @@ class Main extends Phaser.Scene {
     this.tweens.add({ targets: imgR, x: RX, duration: 450, ease: 'Back.easeOut' });
 
     // the right card flips through random avatars, slower and slower, and lands on the opponent
-    const N = 16 + Math.floor(Math.random() * 9);
-    let i = 0, last = -1, t = 650;
+    const N = MATCH_FLIPS[0] + Math.floor(Math.random() * (MATCH_FLIPS[1] - MATCH_FLIPS[0] + 1));
+    let i = 0, last = -1, t = 300;
     const after = (ms, f) => m.timers.push(this.time.delayedCall(ms, f));
     const flip = () => {
-      const final = i === N, d = 70 + Math.pow(i / N, 2) * 340;
+      const final = i === N, d = 60 + Math.pow(i / N, 2) * 200;
       let k; if (final) k = bot.av; else { do { k = Math.floor(Math.random() * BOT_AVATARS); } while (k === last || k === bot.av); }
       last = k;
       this.tweens.add({ targets: imgR, scaleX: 0, duration: d * 0.45, ease: 'Sine.easeIn', onComplete: () => {
@@ -1019,8 +1028,8 @@ class Main extends Phaser.Scene {
       this.tweens.add({ targets: imgR, scale: (CW / 128) * 1.06, duration: 160, yoyo: true });
       this.sfx('ball', 500);
       this.applyBot();
-      after(1700, () => {
-        this.tweens.add({ targets: m.objs, alpha: 0, duration: 350, onComplete: () => { this.clearMatch(); this.beginPlay(); } });
+      after(MATCH_HOLD, () => {
+        this.tweens.add({ targets: m.objs, alpha: 0, duration: 250, onComplete: () => { this.clearMatch(); this.beginPlay(); } });
       });
     };
     after(t, flip);
