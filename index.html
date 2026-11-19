@@ -739,6 +739,12 @@ class Main extends Phaser.Scene {
     this.ringG = this.add.graphics().setDepth(10);                               // live turn-timer ring (redrawn every frame)
     this.turnLeft = TURN_TIME;
     this.railCount = 0;
+    /* Two masks (used only while a ball moves, to keep the game fast):
+       fallMask  = the cloth + the pocket cuts + the pocket circles: a falling ball is hidden as soon as it leaves them, as if it went under the table.
+       railMask  = everything right of the table frame: a ball coming out of the tube is only visible once it is out from under the frame. */
+    const mkMask = draw => { const g = this.make.graphics({ x: 0, y: 0, add: false }); g.fillStyle(0xffffff, 1); draw(g); return g.createGeometryMask(); };
+    this.fallMask = mkMask(g => { g.fillRect(L, T, R - L, B - T); for (const q of POCKETS) { g.fillPoints(q.poly, true); g.fillCircle(q.x, q.y, q.r); } });
+    this.railMask = mkMask(g => g.fillRect(RAIL.mouth, 60, 1280 - RAIL.mouth, 660));
     this.buildRail();
     this.hud = this.add.graphics().setDepth(9);                                  // bar background, slots, avatars, turn rings (redrawn in refreshHud)
     this.score = [0, 0];
@@ -1073,6 +1079,7 @@ class Main extends Phaser.Scene {
 
   resetSprite(s) {                                // a ball sprite back to its normal look (after it was pocketed / sent down the rail)
     this.tweens.killTweensOf([s.ball, s.shine, s.shadow]);
+    [s.ball, s.shine, s.shadow].forEach(o => o.clearMask());
     s.ball.setVisible(true).setAlpha(1).setAngle(0).setDepth(2).setDisplaySize(BR * 2, BR * 2);
     s.shine.setVisible(true).setAlpha(1).setDepth(3).setDisplaySize(BR * 2, BR * 2);
     s.shadow.setVisible(true).setAlpha(1).setDepth(1).setDisplaySize(BR * 3.4, BR * 3.4);
@@ -1080,10 +1087,7 @@ class Main extends Phaser.Scene {
 
   onPocket(b, p) {
     const i = this.sim.balls.indexOf(b), s = this.spr[i];
-    if (b.n === 0) {                               // cue ball: drops into the hole (no shrinking), then is placed back on the table
-      this.tweens.add({ targets: [s.ball, s.shine, s.shadow], x: p.x, y: p.y, alpha: 0, duration: 200, ease: 'Quad.easeIn' });
-      return;
-    }
+    if (b.n === 0) { this.fall(s, p); return; }    // cue ball: goes under the table, then is placed back on the table
     this.potted.push(b.n);
     this.trayImgs[b.n] = this.add.image(0, 0, 'ball' + b.n).setDepth(11).setDisplaySize(SLOT_D, SLOT_D);
     this.layoutTrays();
@@ -1302,23 +1306,30 @@ class Main extends Phaser.Scene {
     for (let k = 1; k < 16; k += 3) { const y = R.slot0 - k * R.dy + R.dy / 2; if (y > ty1 + 14) { g.fillCircle(cx - hw - wl / 2, y, 1.7); g.fillCircle(cx + hw + wl / 2, y, 1.7); } }
     g.fillCircle(cx - hw - wl / 2, iy1 + wl / 2, 1.7); g.fillCircle(cx + hw + wl / 2, iy1 + wl / 2, 1.7);
   }
-  railDrop(b, p) {                                 // pocket swallows the ball, it comes out in the tube (same size) and rolls down to its place
+  fall(s, p, done) {                               // the ball keeps rolling through the pocket and slips under the table (hidden by the mask, no fading / shrinking)
+    let dx = p.x - s.ball.x, dy = p.y - s.ball.y;
+    const d = Math.hypot(dx, dy) || 1, run = d + p.r + BR + 4, T = RAIL_TIME;
+    dx /= d; dy /= d;
+    const objs = [s.ball, s.shine, s.shadow];
+    objs.forEach(o => o.setMask(this.fallMask));
+    this.tweens.add({ targets: objs, x: '+=' + dx * run, y: '+=' + dy * run, duration: run / 0.22 * T, ease: 'Quad.easeIn',
+      onComplete: () => { objs.forEach(o => { o.setVisible(false); o.clearMask(); }); if (done) done(); } });
+  }
+  railDrop(b, p) {                                 // after the fall the ball travels under the table and comes out of the tube (same size), then rolls down to its place
     const s = this.spr[this.sim.balls.indexOf(b)], R = RAIL, T = RAIL_TIME, objs = [s.ball, s.shine];
     const dist = Math.hypot(p.x - R.inX, p.y - R.top);
-    this.tweens.add({ targets: [s.ball, s.shine, s.shadow], x: p.x, y: p.y, alpha: 0, duration: 220, ease: 'Quad.easeIn',     // rolls into the dark hole
-      onComplete: () => this.tweens.add({ targets: s.ball, alpha: 0, duration: (300 + dist * 0.45) * T,                        // travels under the table
-        onComplete: () => {
-          const ty = R.slot0 - this.railCount++ * R.dy, drop = ty - R.top, dur = (1000 + drop * 3.4) * T;
-          s.shadow.setVisible(false);
-          s.ball.setDepth(12); s.shine.setDepth(13);
-          objs.forEach(o => o.setPosition(R.inX, R.top).setAlpha(0));
-          this.tweens.add({ targets: objs, alpha: 1, duration: 180 * T, onComplete: () =>                                       // appears in the tube
-            this.tweens.add({ targets: objs, x: R.x, duration: 320 * T, ease: 'Sine.easeInOut', onComplete: () => {            // into the rail, then down
-              this.tweens.add({ targets: s.ball, angle: s.ball.angle + drop / BR * 57.3, duration: dur, ease: 'Quad.easeIn' });
-              this.tweens.add({ targets: objs, y: ty, duration: dur, ease: 'Quad.easeIn',
-                onComplete: () => this.tweens.add({ targets: objs, y: ty - 3, duration: 120, yoyo: true, ease: 'Sine.easeOut' }) });
-            } }) });
-        } }) });
+    this.fall(s, p, () => this.tweens.add({ targets: s.ball, alpha: 1, duration: (300 + dist * 0.45) * T,                       // hidden: travelling under the table
+      onComplete: () => {
+        const ty = R.slot0 - this.railCount++ * R.dy, drop = ty - R.top, dur = (1000 + drop * 3.4) * T;
+        s.ball.setDepth(12).setVisible(true).setMask(this.railMask); s.shine.setDepth(13).setVisible(true).setMask(this.railMask);
+        objs.forEach(o => o.setPosition(R.mouth - BR - 1, R.top));                                                              // starts hidden behind the table frame
+        this.tweens.add({ targets: objs, x: R.x, duration: 700 * T, ease: 'Sine.easeInOut', onComplete: () => {                 // rolls out of the tube into the rail
+          objs.forEach(o => o.clearMask());
+          this.tweens.add({ targets: s.ball, angle: s.ball.angle + drop / BR * 57.3, duration: dur, ease: 'Quad.easeIn' });
+          this.tweens.add({ targets: objs, y: ty, duration: dur, ease: 'Quad.easeIn',                                            // ...and down
+            onComplete: () => this.tweens.add({ targets: objs, y: ty - 3, duration: 120, yoyo: true, ease: 'Sine.easeOut' }) });
+        } });
+      } }));
   }
 
   /* ---------- settings (gear, top left) ----------
