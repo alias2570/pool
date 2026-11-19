@@ -689,6 +689,9 @@ const SLIDER = { x: 42, y0: 150, y1: 590, zoneW: 80 };
 const GEAR = { x: 42, y: 82, r: 20 };
 const MENU = { x: 100, y: 66, w: 230, rowH: 46 };
 const CUE_LEN = 520;
+/* Ball return rail (right column): potted balls roll from their pocket into the tube at the top, then down the rail and pile up from the bottom.
+   RAIL.x = rail centre, top = height of the tube, slot0 = centre of the first (lowest) ball, dy = spacing between balls. */
+const RAIL = { x: 1238, top: 100, bottom: 598, slot0: 581, dy: 28 };
 const SPIN = { x: 1238, y: 656, r: 32 };          // cue-ball contact dial (tip position on the ball)
 /* Top bar (one row, y = BAR_Y), left to right:  7 ball slots | name | avatar+turn ring | score + entry | avatar | name | 7 slots.
    Ball slots fill from the outer edge inwards.  Everything is positioned from these numbers. */
@@ -732,6 +735,8 @@ class Main extends Phaser.Scene {
 
     this.ringG = this.add.graphics().setDepth(10);                               // live turn-timer ring (redrawn every frame)
     this.turnLeft = TURN_TIME;
+    this.railCount = 0; this.railImgs = [];
+    this.buildRail();
     this.hud = this.add.graphics().setDepth(9);                                  // bar background, slots, avatars, turn rings (redrawn in refreshHud)
     this.score = [0, 0];
     const tgUser = getTelegramUser();
@@ -799,6 +804,7 @@ class Main extends Phaser.Scene {
     }
     Object.values(this.trayImgs).forEach(i => i.destroy());
     this.trayImgs = {}; this.potted = [];
+    this.railImgs.forEach(o => { this.tweens.killTweensOf(o); o.destroy(); }); this.railImgs = []; this.railCount = 0;
     this.state = 'aim'; this.acc = 0; this.power = 0; this.top = 0; this.side = 0; this.turnLeft = TURN_TIME;
     this.aimAngle = 0;
     this.refreshHud();
@@ -1073,6 +1079,7 @@ class Main extends Phaser.Scene {
       this.potted.push(b.n);
       this.trayImgs[b.n] = this.add.image(0, 0, 'ball' + b.n).setDepth(11).setDisplaySize(SLOT_D, SLOT_D);
       this.layoutTrays();
+      this.railDrop(b.n, p);
     }
   }
 
@@ -1248,6 +1255,39 @@ class Main extends Phaser.Scene {
     u.fillStyle(0xe8d59b, A);
     for (const t of [458, 480]) u.fillPoints([{ x, y: hy + t - 5 }, { x: x + 3, y: hy + t }, { x, y: hy + t + 5 }, { x: x - 3, y: hy + t }], true);   // inlays
     seg(CUE_LEN - 14, 7.9, CUE_LEN, 7.9, 0x151515);                       // rubber end
+  }
+
+  /* ---------- ball return rail ---------- */
+  buildRail() {
+    const g = this.add.graphics().setDepth(8), cx = RAIL.x;
+    const chrome = 0x8e99a1, dark = 0x0b130f;
+    g.fillStyle(chrome, 1);                                                          // chrome body: the rail + the tube that leads in from the pocket
+    g.fillRoundedRect(cx - 19, RAIL.top - 18, 38, RAIL.bottom - RAIL.top + 18, 15);
+    g.fillRoundedRect(1190, RAIL.top - 18, cx - 1190 + 6, 36, 9);
+    g.fillStyle(dark, 1);                                                            // dark groove inside
+    g.fillRoundedRect(cx - 13, RAIL.top - 12, 26, RAIL.bottom - RAIL.top + 8, 11);
+    g.fillRoundedRect(1190, RAIL.top - 12, cx - 1190 + 9, 24, 6);
+    g.lineStyle(1.5, 0xdfe6ea, 0.55); g.lineBetween(cx - 18, RAIL.top - 4, cx - 18, RAIL.bottom - 12);   // light edge
+    g.lineStyle(1.5, 0x4d575e, 0.9); g.lineBetween(cx + 18, RAIL.top - 4, cx + 18, RAIL.bottom - 12);     // shade edge
+    g.lineStyle(1, 0x24342c, 1);                                                     // one cross mark per ball place
+    for (let k = 0; k <= 15; k++) { const y = RAIL.slot0 + RAIL.dy / 2 - k * RAIL.dy; g.lineBetween(cx - 12, y, cx + 12, y); }
+  }
+  railDrop(n, p) {                                 // a potted ball rolls out of its pocket, through the tube and down to the next free place
+    const ty = RAIL.slot0 - this.railCount++ * RAIL.dy, cx = RAIL.x;
+    const ball = this.add.image(p.x, p.y, 'ball' + n).setDepth(12).setDisplaySize(SLOT_D, SLOT_D).setAlpha(0);
+    const shine = this.add.image(p.x, p.y, 'shine').setDepth(13).setDisplaySize(SLOT_D, SLOT_D).setAlpha(0);
+    const objs = [ball, shine], drop = ty - RAIL.top;
+    this.railImgs.push(ball, shine);
+    this.tweens.add({ targets: objs, x: 1200, y: RAIL.top, duration: 240, delay: 150, ease: 'Sine.easeIn',
+      onStart: () => objs.forEach(o => o.setAlpha(1)),
+      onComplete: () => {
+        this.tweens.add({ targets: objs, x: cx, y: RAIL.top, duration: 150, ease: 'Linear',
+          onComplete: () => {
+            this.tweens.add({ targets: ball, angle: ball.angle + drop / (SLOT_D / 2) * 57.3, duration: 260 + drop * 1.1, ease: 'Quad.easeIn' });
+            this.tweens.add({ targets: objs, y: ty, duration: 260 + drop * 1.1, ease: 'Quad.easeIn',
+              onComplete: () => this.tweens.add({ targets: objs, y: ty - 3, duration: 70, yoyo: true, ease: 'Sine.easeOut' }) });
+          } });
+      } });
   }
 
   /* ---------- settings (gear, top left) ----------
