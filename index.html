@@ -724,16 +724,30 @@ const BOT_SHOW_AS_BOT = false;
 const BOT_NAMES = ['Patricia', 'Mehdi', 'Arash', 'Sara', 'Carlos', 'Mika', 'Yuki', 'Dmitri', 'Leila', 'Omar', 'Nina', 'Tiago', 'Hana', 'Reza',
   'Elena', 'Ivan', 'Kian', 'Maya', 'Luca', 'Sina', 'Aria', 'Jonas', 'Farid', 'Zoe', 'Nima', 'Bruno', 'Anya', 'Sam', 'Parisa', 'Alex',
   'Kimia', 'Rico', 'Behnam', 'Lena', 'Hugo', 'Roya', 'Tom', 'Mina', 'Diego', 'Sohrab'];
-// sigma = aiming error in degrees, pw = power error (fraction), cands = how many shot ideas it tries, think = seconds of "thinking", breakP = break power
+/* sigma = aiming error in degrees on an average shot (it grows with the difficulty of the shot), pw = power error (fraction),
+   cands = how many shot ideas it tries, think = seconds of "thinking", breakP = break power,
+   pickBest = chance to take the best simulated shot (otherwise a good-but-not-best one),
+   slip = chance of a real blunder (mostly on hard shots), safeP = chance to play a safety instead of a risky shot */
 const BOT_LEVELS = [
-  { name: 'Easy',      sigma: 3.2,  pw: 0.28, cands: 2,  think: [1.0, 2.0], breakP: 0.62 },
-  { name: 'Normal',    sigma: 1.7,  pw: 0.18, cands: 3,  think: [1.2, 2.4], breakP: 0.75 },
-  { name: 'Hard',      sigma: 0.8,  pw: 0.12, cands: 5,  think: [1.4, 2.8], breakP: 0.85 },
-  { name: 'Very hard', sigma: 0.35, pw: 0.07, cands: 8,  think: [1.5, 3.0], breakP: 0.92 },
-  { name: 'Expert',    sigma: 0.1,  pw: 0.04, cands: 14, think: [1.6, 3.2], breakP: 0.97 }
+  { name: 'Easy',      sigma: 2.6,  pw: 0.25, cands: 3,  think: [1.0, 2.0], breakP: 0.62, pickBest: 0.45, slip: 0.20,  safeP: 0.05 },
+  { name: 'Normal',    sigma: 1.4,  pw: 0.16, cands: 4,  think: [1.2, 2.4], breakP: 0.75, pickBest: 0.70, slip: 0.11,  safeP: 0.12 },
+  { name: 'Hard',      sigma: 0.7,  pw: 0.11, cands: 6,  think: [1.4, 2.8], breakP: 0.85, pickBest: 0.85, slip: 0.06,  safeP: 0.20 },
+  { name: 'Very hard', sigma: 0.32, pw: 0.07, cands: 9,  think: [1.5, 3.0], breakP: 0.92, pickBest: 0.93, slip: 0.03,  safeP: 0.28 },
+  { name: 'Expert',    sigma: 0.12, pw: 0.04, cands: 14, think: [1.6, 3.2], breakP: 0.97, pickBest: 0.98, slip: 0.012, safeP: 0.35 }
+];
+/* Playing styles, independent of the skill level (two "Normal" bots do not play alike).
+   sigmaMul = aim error multiplier, powerMul = hits harder / softer, thinkMul = thinks faster / slower,
+   safety = how often it plays safe, hard = taste for difficult shots (+ bold, - careful), pos = how much it cares where the cue ball ends up */
+const BOT_PERSONAS = [
+  { name: 'Aggressive', sigmaMul: 1.15, powerMul: 1.1,  thinkMul: 0.75, safety: 0.2, hard: 0.6,  pos: 0 },
+  { name: 'Cautious',   sigmaMul: 0.95, powerMul: 0.92, thinkMul: 1.2,  safety: 1.8, hard: -0.8, pos: 0.4 },
+  { name: 'Precise',    sigmaMul: 0.7,  powerMul: 1.0,  thinkMul: 1.3,  safety: 0.7, hard: 0,    pos: 0.3 },
+  { name: 'Tactical',   sigmaMul: 1.0,  powerMul: 1.0,  thinkMul: 1.1,  safety: 1.2, hard: 0,    pos: 1 }
 ];
 const BOT_AVATARS = 14;
-const MATCH_FLIPS = [9, 13], MATCH_HOLD = 1000;   // matchmaking screen: number of card flips (min, max) and how long the found opponent stays (ms)
+/* matchmaking screen: the search lasts MATCH_SEARCH seconds (random, now and then a long one), then the cards slow down for MATCH_FLIPS flips
+   and the found opponent stays MATCH_HOLD ms */
+const MATCH_SEARCH = [2, 6.5], MATCH_LONG = [7, 9.5], MATCH_LONG_P = 0.15, MATCH_FLIPS = [6, 9], MATCH_HOLD = 1000;
 const gauss = () => { let u = 0; while (!u) u = Math.random(); const v = Math.random(); return Math.max(-2.5, Math.min(2.5, Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v))); };
 const rand = (a, b) => a + Math.random() * (b - a);
 function segDist(px, py, x1, y1, x2, y2) {
@@ -965,9 +979,26 @@ class Main extends Phaser.Scene {
     }
     c.restore(); t.refresh();
   }
+  /* The player's record (saved on the phone) picks the strength of the next opponent: a few wins in a row = a stronger one, losses = a weaker one.
+     It is decided once, before the game; the strength never changes in the middle of a match. A bit of randomness keeps it from feeling rigged. */
+  loadStats() {
+    try { const s = JSON.parse(localStorage.getItem('pool_stats') || 'null'); if (s) return s; } catch (e) {}
+    return { w: 0, l: 0, streak: 0, last: '', lastP: -1 };
+  }
+  saveStats() { try { localStorage.setItem('pool_stats', JSON.stringify(this.stats)); } catch (e) {} }
+  recordResult(humanWon) {
+    const s = this.stats || (this.stats = this.loadStats());
+    if (humanWon) { s.w++; s.streak = s.streak > 0 ? s.streak + 1 : 1; } else { s.l++; s.streak = s.streak < 0 ? s.streak - 1 : -1; }
+    this.saveStats();
+  }
   pickBot() {
-    let name; do { name = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)]; } while (name === this.names[0]);
-    this.bot = { name, av: Math.floor(Math.random() * BOT_AVATARS), level: Math.floor(Math.random() * BOT_LEVELS.length) };
+    const s = this.stats || (this.stats = this.loadStats());
+    let name; do { name = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)]; } while (name === this.names[0] || name === s.last);
+    const skill = 1.5 + Phaser.Math.Clamp(s.streak, -3, 3) * 0.5 + Phaser.Math.Clamp((s.w - s.l) * 0.12, -1, 1);
+    const level = Phaser.Math.Clamp(Math.round(skill + rand(-0.9, 0.9)), 0, BOT_LEVELS.length - 1);
+    let persona; do { persona = Math.floor(Math.random() * BOT_PERSONAS.length); } while (persona === s.lastP);
+    s.last = name; s.lastP = persona; this.saveStats();
+    this.bot = { name, av: Math.floor(Math.random() * BOT_AVATARS), level, persona };
   }
   applyBot() {                                     // the opponent's name + avatar go into the top bar
     const b = this.bot;
@@ -1006,10 +1037,12 @@ class Main extends Phaser.Scene {
 
     // the right card flips through random avatars, slower and slower, and lands on the opponent
     const N = MATCH_FLIPS[0] + Math.floor(Math.random() * (MATCH_FLIPS[1] - MATCH_FLIPS[0] + 1));
+    const searchMs = (Math.random() < MATCH_LONG_P ? rand(MATCH_LONG[0], MATCH_LONG[1]) : rand(MATCH_SEARCH[0], MATCH_SEARCH[1])) * 1000, st = performance.now();
     let i = 0, last = -1, t = 300;
     const after = (ms, f) => m.timers.push(this.time.delayedCall(ms, f));
     const flip = () => {
-      const final = i === N, d = 60 + Math.pow(i / N, 2) * 200;
+      const searching = performance.now() - st < searchMs;                              // still searching: steady flips; then slow down and land
+      const final = !searching && i === N, d = searching ? rand(220, 420) : 60 + Math.pow(i / N, 2) * 200;
       let k; if (final) k = bot.av; else { do { k = Math.floor(Math.random() * BOT_AVATARS); } while (k === last || k === bot.av); }
       last = k;
       this.tweens.add({ targets: imgR, scaleX: 0, duration: d * 0.45, ease: 'Sine.easeIn', onComplete: () => {
@@ -1017,7 +1050,7 @@ class Main extends Phaser.Scene {
         this.tweens.add({ targets: imgR, scaleX: CW / 128, duration: d * 0.55, ease: 'Sine.easeOut' });
       } });
       if (!final) this.tickSound(false);
-      i++;
+      if (!searching) i++;
       if (final) after(d + 80, reveal); else after(d, flip);
     };
     const reveal = () => {
@@ -1130,6 +1163,7 @@ class Main extends Phaser.Scene {
     }
     if (this.rules.winner >= 0) {
       this.state = 'over'; this.score[this.rules.winner]++;
+      this.recordResult(this.rules.winner === 0);
       const why = res.reason ? ' (' + res.reason + ')' : '';
       this.msg.setText(who(this.rules.winner) + ' wins!' + why + '  Tap the gear > New game to play again');
       this.refreshHud(); return;
@@ -1154,10 +1188,13 @@ class Main extends Phaser.Scene {
 
 
   /* ---------- computer opponent ----------
-     Plan: list shot ideas (ball + pocket, with a clear path), SIMULATE each one with the real physics + the real rules at a few powers,
-     keep the best.  The level decides how many ideas it tries, then the aim and power get a random error (BOT_LEVELS).
-     Then it "plays" like a person: waits (thinks), places the cue ball if it has ball in hand, turns the cue, pulls it back and shoots. */
-  botShot(angle, power, pos, before) {
+     Plan: list shot ideas (ball + pocket, with a clear path) and give each a DIFFICULTY (thin cut, long distance).
+     Every idea is SIMULATED with the real physics + the real rules at a few powers.  Then the bot behaves like a person:
+       - it does not always take the best shot (BOT_LEVELS.pickBest), the persona (BOT_PERSONAS) tilts its taste: bold / careful / precise / positional
+       - its aiming error grows with the difficulty of the shot; easy shots are almost always made, hard ones often missed
+       - sometimes it plays a safety instead of a risky shot
+       - thinking time depends on the shot; it fidgets, glances at another shot, overshoots the aim, takes practice strokes, then pulls back and shoots. */
+  botShot(angle, power, pos, before, safe, posW) {
     const s = this.botSim || (this.botSim = new Sim());
     s.balls = this.sim.balls.map(b => ({ ...b })); s.events = [];
     const cb = s.balls[0]; if (pos) { cb.x = pos.x; cb.y = pos.y; }
@@ -1177,16 +1214,27 @@ class Main extends Phaser.Scene {
     let sc = Math.random() * 2;
     if (res.winner === 1) return sc + 1000;
     if (res.winner === 0) return sc - 1000;
-    if (res.foul) sc -= 200;
+    if (res.foul) return sc - 200;
     for (const n of res.potted) sc += (!mine || Rules.groupOf(n) === mine) ? 100 : -40;
     if (res.continues) sc += 30;
+    if (cb.active) {                                                                  // where does the cue ball end up?
+      const all = s.balls.filter(b => b.active && b.n !== 0);
+      const isMine = b => b.n !== 8 && (!mine || Rules.groupOf(b.n) === mine);
+      const own = all.filter(isMine), foe = all.filter(b => b.n !== 8 && mine && !isMine(b));
+      const open = list => list.filter(o => all.every(q => q === o || segDist(q.x, q.y, cb.x, cb.y, o.x, o.y) > 2 * BR - 1)).length;
+      if (safe) sc = 40 - 14 * open(foe) + Math.random();                             // a safety is good when the opponent has no clear line
+      else if (posW) {
+        const nearRail = cb.x < L + 36 || cb.x > R - 36 || cb.y < T + 36 || cb.y > B - 36;
+        sc += posW * (Math.min(3, open(own)) * 6 - (nearRail ? 8 : 0));              // positional play: keep a clear next shot, avoid the rail
+      }
+    }
     return sc;
   }
   *botPlan(lv) {                                   // generator: does one simulated shot, then yields (so the game never freezes)
-    const sim = this.sim, r = this.rules, cue = sim.balls[0];
+    const sim = this.sim, r = this.rules, cue = sim.balls[0], P = lv.p;
     if (r.breakShot) {
       const pos = { x: HEAD_X - 6, y: CY + rand(-70, 70) };
-      return { angle: Math.atan2(CY - pos.y, L + (R - L) * 0.75 - pos.x), power: lv.breakP, pos };
+      return { angle: Math.atan2(CY - pos.y, L + (R - L) * 0.75 - pos.x), power: Math.min(1, lv.breakP * rand(0.96, 1.02)), pos, diff: 0.3 };
     }
     const act = sim.balls.filter(b => b.active && b.n !== 0), before = new Set(act.map(b => b.n));
     const tgt = r.target(1, before), bih = r.ballInHand;
@@ -1196,10 +1244,10 @@ class Main extends Phaser.Scene {
     const clear = (x1, y1, x2, y2, ign) => act.every(o => o === ign || segDist(o.x, o.y, x1, y1, x2, y2) > 2 * BR - 1);
     const shots = [], safeties = [];
     for (const B of mine) {
-      for (const P of POCKETS) {
-        let dx = P.x - B.x, dy = P.y - B.y; const d = Math.hypot(dx, dy); dx /= d; dy /= d;
+      for (const Pk of POCKETS) {
+        let dx = Pk.x - B.x, dy = Pk.y - B.y; const d = Math.hypot(dx, dy); dx /= d; dy /= d;
         const G = { x: B.x - dx * 2 * BR, y: B.y - dy * 2 * BR };                    // ghost ball: where the cue ball must be at contact
-        if (!clear(B.x, B.y, P.x, P.y, B)) continue;
+        if (!clear(B.x, B.y, Pk.x, Pk.y, B)) continue;
         let C = cue, pos = null;
         if (bih) {                                                                    // ball in hand: put the cue ball on the line behind the ghost ball
           for (const back of [150, 230, 90]) { const x = G.x - dx * back, y = G.y - dy * back; if (free(x, y) && clear(x, y, G.x, G.y, B)) { pos = { x, y }; break; } }
@@ -1207,49 +1255,90 @@ class Main extends Phaser.Scene {
         } else if (!clear(C.x, C.y, G.x, G.y, B)) continue;
         let vx = G.x - C.x, vy = G.y - C.y; const vd = Math.hypot(vx, vy); vx /= vd; vy /= vd;
         const cos = vx * dx + vy * dy; if (cos < 0.2) continue;                       // too thin a cut
-        shots.push({ angle: Math.atan2(vy, vx), pos, q: cos * 2 - (vd + d) / 900 });
+        const diff = Math.min(1, (1 - cos) * 1.3 + (vd + d) / 1200);                  // 0 = easy, 1 = very hard
+        shots.push({ angle: Math.atan2(vy, vx), pos, diff, q: cos * 2 - (vd + d) / 900 });
       }
-      if (!bih && clear(cue.x, cue.y, B.x, B.y, B)) safeties.push({ angle: Math.atan2(B.y - cue.y, B.x - cue.x), pos: null, q: 0 });
+      if (!bih && clear(cue.x, cue.y, B.x, B.y, B)) safeties.push({ angle: Math.atan2(B.y - cue.y, B.x - cue.x), pos: null, safety: true, diff: 0.15, dist: Math.hypot(B.x - cue.x, B.y - cue.y), q: 0 });
     }
     shots.sort((a, b) => b.q - a.q);
+    safeties.sort((a, b) => a.dist - b.dist);
     let pool = lv.level < 2 ? shots.slice().sort(() => Math.random() - 0.5).slice(0, lv.cands) : shots.slice(0, lv.cands);
-    if (safeties.length && (pool.length < lv.cands || lv.level >= 2)) pool.push(safeties[0]);
+    // a safety instead of a risky shot: only when there is no easy shot, and mostly for careful / tactical players at higher levels
+    const wantSafe = safeties.length && (!shots.length || shots[0].diff > 0.4) && Math.random() < lv.safeP * P.safety;
+    if (wantSafe) pool = safeties.slice(0, 2);
+    else if (safeties.length && !pool.length) pool.push(safeties[0]);
     if (!pool.length) {                                                               // nothing makeable: just hit the nearest legal ball
       const T0 = (mine.length ? mine : act).slice().sort((a, b) => Math.hypot(a.x - cue.x, a.y - cue.y) - Math.hypot(b.x - cue.x, b.y - cue.y))[0];
-      return { angle: Math.atan2(T0.y - cue.y, T0.x - cue.x), power: 0.5, pos: null };
+      return { angle: Math.atan2(T0.y - cue.y, T0.x - cue.x), power: 0.5, pos: null, diff: 0.7 };
     }
-    let best = null;
-    for (const c of pool) for (const p of [0.3, 0.5, 0.7, 0.9]) {                     // lowest power that gives the best result
-      const sc = this.botShot(c.angle, p, c.pos, before); yield;
-      if (!best || sc > best.score + 1e-6) best = { angle: c.angle, power: p, pos: c.pos, score: sc };
+    const results = [];
+    for (const c of pool) for (const p of (c.safety ? [0.22, 0.35, 0.5] : [0.3, 0.5, 0.7, 0.9])) {
+      const sc = this.botShot(c.angle, p, c.pos, before, !!c.safety, lv.level >= 1 ? P.pos : 0) + P.hard * c.diff * 25; yield;
+      results.push({ angle: c.angle, power: p, pos: c.pos, score: sc, diff: c.diff, safety: !!c.safety });
     }
-    return best;
+    results.sort((a, b) => b.score - a.score);
+    let pick = results[0];
+    const ok = results.filter(e => e.score > -100);                                   // never pick a foul on purpose
+    if (ok.length > 1 && Math.random() > lv.pickBest) pick = ok[1 + Math.floor(Math.random() * Math.min(2, ok.length - 1))];   // a human does not always see the best shot
+    const other = pool.find(c => Math.abs(c.angle - pick.angle) > 0.05);
+    pick.alt = other ? other.angle : undefined;                                       // used only for the "looking at another shot" movement
+    return pick;
+  }
+  botThink(lv, plan) {                             // seconds of thinking: easy shot = quick, hard shot / safety = longer, now and then a long hesitation
+    let t = rand(lv.think[0], lv.think[1]) * lv.p.thinkMul * (0.5 + (plan.diff == null ? 0.4 : plan.diff) * 0.9);
+    if (plan.safety) t *= 1.15;
+    if (Math.random() < 0.12) t += rand(1.2, 2.6);
+    return Phaser.Math.Clamp(t, 0.7, 7.5);
+  }
+  botSeg(a, b) {                                   // one smooth turn of the cue from angle a to angle b
+    const d = Math.atan2(Math.sin(b - a), Math.cos(b - a));
+    return { d, dur: Phaser.Math.Clamp(0.25 + Math.abs(d) * 0.9 + rand(0, 0.25), 0.3, 1.1) };
   }
   botUpdate(dt) {
     if (!this.isBotTurn() || this.state !== 'aim') { this.botJob = null; return; }
-    const lv = Object.assign({ level: this.bot.level }, BOT_LEVELS[this.bot.level]);
+    const lv = Object.assign({ level: this.bot.level, p: BOT_PERSONAS[this.bot.persona] }, BOT_LEVELS[this.bot.level]);
     let j = this.botJob;
-    if (!j) j = this.botJob = { phase: 'plan', t: 0, wait: rand(lv.think[0], lv.think[1]), gen: this.botPlan(lv), plan: null };
+    if (!j) j = this.botJob = { phase: 'plan', t: 0, gen: this.botPlan(lv), plan: null };
     j.t += dt;
     if (j.phase === 'plan') {
       const t0 = performance.now();
-      while (performance.now() - t0 < 6) { const r = j.gen.next(); if (r.done) { j.plan = r.value; j.phase = 'wait'; break; } }
-    } else if (j.phase === 'wait') {
-      if (j.t >= j.wait) {
-        const c = this.sim.balls[0], pl = j.plan;
-        if (pl.pos) { c.x = pl.pos.x; c.y = pl.pos.y; }                               // ball in hand / break: place the cue ball
-        j.target = pl.angle + gauss() * lv.sigma * Math.PI / 180;                     // the level's aiming error
-        j.power = Phaser.Math.Clamp(pl.power * (1 + gauss() * lv.pw), 0.08, 1);
-        j.a0 = this.aimAngle; j.d = Math.atan2(Math.sin(j.target - j.a0), Math.cos(j.target - j.a0)); j.t2 = 0; j.phase = 'aim';
+      while (performance.now() - t0 < 6) {
+        const r = j.gen.next();
+        if (r.done) { j.plan = r.value; j.wait = j.t + this.botThink(lv, j.plan); j.phase = 'wait'; break; }
       }
-    } else if (j.phase === 'aim') {                                                   // turn the cue towards the shot
-      j.t2 += dt; const k = Math.min(1, j.t2 / 0.8), e = k * k * (3 - 2 * k);
-      this.aimAngle = j.a0 + j.d * e;
-      if (k >= 1) { j.phase = 'pull'; j.t3 = 0; }
-    } else if (j.phase === 'pull') {                                                  // pull the cue back, then shoot
-      j.t3 += dt; const k = Math.min(1, j.t3 / 0.7);
-      this.power = j.power * k * k * (3 - 2 * k);
-      if (j.t3 > 0.9) { this.power = j.power; this.botJob = null; this.fire(); this.power = 0; }
+    } else if (j.phase === 'wait') {
+      this.aimAngle += (Math.random() - 0.5) * 0.0016;                                // small fidgets while thinking
+      if (j.t >= j.wait) {
+        const c = this.sim.balls[0], pl = j.plan, D = Math.PI / 180, diff = pl.diff == null ? 0.4 : pl.diff;
+        if (pl.pos) { c.x = pl.pos.x; c.y = pl.pos.y; }                               // ball in hand / break: place the cue ball
+        let err = gauss() * lv.sigma * lv.p.sigmaMul * (0.45 + 1.1 * diff);           // error grows with the difficulty of the shot
+        if (Math.random() < lv.slip * (0.4 + diff * diff * 2.2)) err += (Math.random() < 0.5 ? -1 : 1) * rand(2, 5.5);   // a real blunder, mostly on hard shots
+        j.target = pl.angle + err * D;
+        j.power = Phaser.Math.Clamp(pl.power * lv.p.powerMul * (1 + gauss() * lv.pw), 0.08, 1);
+        const wp = [];
+        if (pl.alt !== undefined && Math.random() < 0.4) wp.push(pl.alt + gauss() * 0.04);                       // glances at another shot first
+        if (Math.random() < 0.65) wp.push(j.target + (Math.random() < 0.5 ? -1 : 1) * rand(0.4, 1.8) * D);      // overshoots a little, then comes back
+        wp.push(j.target);
+        j.wp = wp; j.wi = 0; j.a0 = this.aimAngle; j.t2 = 0; j.seg = this.botSeg(j.a0, wp[0]); j.phase = 'aim';
+      }
+    } else if (j.phase === 'aim') {                                                   // turn the cue through the way points
+      j.t2 += dt; const k = Math.min(1, j.t2 / j.seg.dur), e = k * k * (3 - 2 * k);
+      this.aimAngle = j.a0 + j.seg.d * e;
+      if (k >= 1) {
+        j.wi++;
+        if (j.wi < j.wp.length) { j.a0 = this.aimAngle; j.t2 = 0; j.seg = this.botSeg(j.a0, j.wp[j.wi]); }
+        else { this.aimAngle = j.target; j.phase = 'practice'; j.t3 = 0; j.strokes = Math.floor(rand(1, 3.99)); j.amp = rand(0.07, 0.2); j.sd = rand(0.38, 0.55); }
+      }
+    } else if (j.phase === 'practice') {                                              // 1-3 practice strokes: the cue slides back and forth a little
+      j.t3 += dt; const u = j.t3 / j.sd;
+      this.aimAngle = j.target + Math.sin(j.t3 * 9) * 0.0012;
+      if (u >= j.strokes) { this.power = 0; j.phase = 'pull'; j.t3 = 0; j.pd = rand(0.55, 0.95); j.hold = rand(0.12, 0.4); }
+      else this.power = j.amp * (0.5 - 0.5 * Math.cos(2 * Math.PI * u));
+    } else if (j.phase === 'pull') {                                                  // pull the cue back, hold a moment, then shoot
+      j.t3 += dt; const k = Math.min(1, j.t3 / j.pd), e = k * k * (3 - 2 * k);
+      this.power = j.power * e;
+      this.aimAngle = j.target + Math.sin(j.t3 * 14) * 0.0012 * (1 - e);
+      if (j.t3 > j.pd + j.hold) { this.aimAngle = j.target; this.power = j.power; this.botJob = null; this.fire(); this.power = 0; }
     }
   }
 
