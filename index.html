@@ -831,6 +831,14 @@ const SPIN = { x: 1238, y: 656, r: 32 };          // cue-ball contact dial (tip 
 const BAR_Y = 28, SLOT_D = 22, SLOT_DX = 26, SLOT0 = 96, SLOT1 = 1184;   // slot size, spacing, first-slot centre of player 1 / player 2
 const AV_X = [470, 810], AV_R = 19, AV_COL = [0x2f6fdb, 0xd9822b];       // avatar centres, radius, colours
 const TURN_TIME = 30, TURN_WARN = 8;                                      // seconds per turn; the ring turns red and ticks during the last TURN_WARN seconds
+/* Tables (rooms) the player chooses from before the search.  lo..hi = the opponent's skill range (index into BOT_LEVELS),
+   entry = what the table costs (placeholder text: all free until leagues / tokens exist). */
+const ROOMS = [
+  { name: 'Rookie', sub: 'Beginner table', lo: 0, hi: 1, entry: 'FREE', col: 0x4ade80 },
+  { name: 'Club',   sub: 'Club table',     lo: 1, hi: 2, entry: 'FREE', col: 0x4d9bff },
+  { name: 'Pro',    sub: 'Pro table',      lo: 2, hi: 3, entry: 'FREE', col: 0xb36bff },
+  { name: 'Master', sub: 'Master table',   lo: 3, hi: 4, entry: 'FREE', col: 0xffc21a }
+];
 const ENTRY_LABEL = 'FREE';                                              // league entry shown under the score (placeholder until leagues exist)
 const AIM_SENS = 0.5, AIM_MIN_R = 30, AIM_REF_R = 350;               // aiming feel (see setAim)
 const HEAD_X = L + 250;                           // head string (break placement limit)
@@ -840,7 +848,8 @@ class Main extends Phaser.Scene {
     buildTextures(this);
     this.loadSamples();
     this.buildPeopleArt();
-    this.vsBot = true; this.bot = null; this.botJob = null; this.mm = null;
+    this.vsBot = true; this.bot = null; this.botJob = null; this.mm = null; this.rm = null;
+    try { this.room = Math.max(0, Math.min(ROOMS.length - 1, +localStorage.getItem('pool_room') || 0)); } catch (e) { this.room = 0; }
     this.eq = []; this.rollCtx = []; this.rollOut = []; this.ori = [];
     for (let n = 0; n <= 15; n++) {                // one rolling-sphere texture per ball number
       this.eq[n] = buildEquirect(n);
@@ -934,20 +943,76 @@ class Main extends Phaser.Scene {
 
   /* ---------- game flow ---------- */
   startGame() {
-    this.clearMatch(); this.botJob = null;
+    this.clearMatch(); this.clearRooms(); this.botJob = null;
     this.rules.reset();
     this.rules.turn = Math.random() < 0.5 ? 0 : 1;   // random who breaks
     this.score = [0, 0];
     this.newRack();
-    this.pickBot();
-    this.showMatch();                                // matchmaking screen, then beginPlay()
+    this.showRooms();                                // choose a table -> pickRoom() -> matchmaking screen -> beginPlay()
   }
   beginPlay() {
+    this.entryT.setText(ROOMS[this.room].entry);
     this.state = 'aim'; this.turnLeft = TURN_TIME;
     this.refreshHud();
     this.msg.setText(this.rules.turn === 0 ? 'Break: drag the cue ball behind the line if you like, then aim' : this.names[1] + ' breaks');
   }
   isBotTurn() { return this.vsBot && this.rules.turn === 1 && this.rules.winner < 0; }
+
+
+  /* ---------- table (room) selection: four cards ---------- */
+  clearRooms() {
+    const m = this.rm; if (!m) return;
+    this.tweens.killTweensOf(m.objs); m.objs.forEach(o => o.destroy()); this.rm = null;
+  }
+  showRooms() {
+    const D = 50, CWD = 220, CH = 380, GAP = 22, CYY = 392;
+    const m = this.rm = { objs: [], cards: [] }, add = o => { m.objs.push(o); return o; };
+    this.state = 'rooms'; this.botJob = null;
+    add(this.add.rectangle(640, 360, 1280, 720, 0x05080a, 0.92).setDepth(D));
+    add(this.add.text(640, 78, 'Choose your table', { fontFamily: 'Arial', fontSize: '36px', fontStyle: 'bold', color: '#e7f3ea' }).setOrigin(0.5).setDepth(D + 1));
+    add(this.add.text(640, 118, 'Higher tables = tougher opponents', { fontFamily: 'Arial', fontSize: '17px', color: '#8fb39b' }).setOrigin(0.5).setDepth(D + 1));
+    const x0 = 640 - (4 * CWD + 3 * GAP) / 2 + CWD / 2;
+    const txt = (x, y, t, size, col, bold) => add(this.add.text(x, y, t, { fontFamily: 'Arial', fontSize: size + 'px', fontStyle: bold ? 'bold' : 'normal', color: col }).setOrigin(0.5).setDepth(D + 3));
+    const hex = c => '#' + c.toString(16).padStart(6, '0');
+    ROOMS.forEach((R0, i) => {
+      const x = x0 + i * (CWD + GAP), top = CYY - CH / 2, last = i === this.room;
+      const g = add(this.add.graphics().setDepth(D + 2));
+      g.fillStyle(0x121c17, 1); g.fillRoundedRect(x - CWD / 2, top, CWD, CH, 18);
+      g.fillStyle(R0.col, 0.18); g.fillRoundedRect(x - CWD / 2, top, CWD, 112, { tl: 18, tr: 18, bl: 0, br: 0 });
+      g.lineStyle(last ? 4 : 2, R0.col, last ? 1 : 0.55); g.strokeRoundedRect(x - CWD / 2, top, CWD, CH, 18);
+      for (let k = 0; k <= i; k++) {                                              // stars = table rank
+        const sx = x + (k - i / 2) * 30, sy = top + 38; g.fillStyle(R0.col, 1); g.beginPath();
+        for (let q = 0; q < 10; q++) { const a = -Math.PI / 2 + q * Math.PI / 5, r = q % 2 ? 6 : 14; g.lineTo(sx + Math.cos(a) * r, sy + Math.sin(a) * r); }
+        g.closePath(); g.fillPath();
+      }
+      txt(x, top + 82, R0.name, 32, hex(R0.col), true);
+      txt(x, top + 138, R0.sub, 15, '#8fb39b');
+      g.lineStyle(1, 0x2a3d31, 1); g.lineBetween(x - 80, top + 158, x + 80, top + 158);
+      txt(x, top + 182, 'Opponents', 13, '#8fb39b');
+      for (let k = 0; k < BOT_LEVELS.length; k++) {                               // five pips = the skill range of this table
+        const on = k >= R0.lo && k <= R0.hi; g.fillStyle(on ? R0.col : 0x23332a, 1); g.fillCircle(x + (k - 2) * 24, top + 208, 7);
+      }
+      txt(x, top + 236, BOT_LEVELS[R0.lo].name + ' – ' + BOT_LEVELS[R0.hi].name, 16, '#e7f3ea');
+      g.fillStyle(0x0b130f, 1); g.fillRoundedRect(x - 52, top + 262, 104, 34, 17); g.lineStyle(1, 0x2a3d31, 1); g.strokeRoundedRect(x - 52, top + 262, 104, 34, 17);
+      txt(x, top + 279, R0.entry, 18, '#ffd166', true);
+      g.fillStyle(R0.col, 1); g.fillRoundedRect(x - 80, top + 318, 160, 40, 20);
+      txt(x, top + 338, 'PLAY', 20, '#0b130f', true);
+      m.cards.push({ i, x0: x - CWD / 2, x1: x + CWD / 2, y0: top, y1: top + CH });
+    });
+    m.objs.forEach(o => { o.setAlpha(0); }); this.tweens.add({ targets: m.objs, alpha: 1, duration: 250 });
+  }
+  roomTap(p) {
+    const m = this.rm; if (!m) return;
+    const c = m.cards.find(c => p.x >= c.x0 && p.x <= c.x1 && p.y >= c.y0 && p.y <= c.y1);
+    if (c) this.pickRoom(c.i);
+  }
+  pickRoom(i) {
+    this.room = i; try { localStorage.setItem('pool_room', String(i)); } catch (e) {}
+    this.sfx('ball', 400);
+    this.clearRooms();
+    this.pickBot();
+    this.showMatch();
+  }
 
   /* ---------- opponent + matchmaking screen ---------- */
   buildPeopleArt() {                               // bot avatars (square card + round version for the top bar), user card, "VS" logo
@@ -994,8 +1059,9 @@ class Main extends Phaser.Scene {
   pickBot() {
     const s = this.stats || (this.stats = this.loadStats());
     let name; do { name = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)]; } while (name === this.names[0] || name === s.last);
-    const skill = 1.5 + Phaser.Math.Clamp(s.streak, -3, 3) * 0.5 + Phaser.Math.Clamp((s.w - s.l) * 0.12, -1, 1);
-    const level = Phaser.Math.Clamp(Math.round(skill + rand(-0.9, 0.9)), 0, BOT_LEVELS.length - 1);
+    const R0 = ROOMS[this.room];                      // the table sets the range; the player's record only moves it inside that range
+    const skill = (R0.lo + R0.hi) / 2 + Phaser.Math.Clamp(s.streak, -3, 3) * 0.35 + Phaser.Math.Clamp((s.w - s.l) * 0.12, -1, 1) * 0.5;
+    const level = Phaser.Math.Clamp(Math.round(skill + rand(-0.7, 0.7)), R0.lo, R0.hi);
     let persona; do { persona = Math.floor(Math.random() * BOT_PERSONAS.length); } while (persona === s.lastP);
     s.last = name; s.lastP = persona; this.saveStats();
     this.bot = { name, av: Math.floor(Math.random() * BOT_AVATARS), level, persona };
@@ -1031,7 +1097,7 @@ class Main extends Phaser.Scene {
     const nameR = add(this.add.text(RX, CYY + CW / 2 + 42, bot.name, nf).setOrigin(0.5).setDepth(D + 2).setAlpha(0));
     const vs = add(this.add.image(640, CYY - 10, 'vslogo').setDepth(D + 4).setScale(0));
     const fee = add(this.add.graphics().setDepth(D + 2)); fee.fillStyle(0x14181c, 1); fee.fillRoundedRect(598, CYY + 40, 84, 84, 12); fee.lineStyle(2, 0x3a424a, 1); fee.strokeRoundedRect(598, CYY + 40, 84, 84, 12);
-    add(this.add.text(640, CYY + 82, ENTRY_LABEL, { fontFamily: 'Arial', fontSize: '22px', fontStyle: 'bold', color: '#ffd166' }).setOrigin(0.5).setDepth(D + 3));
+    add(this.add.text(640, CYY + 82, ROOMS[this.room].entry, { fontFamily: 'Arial', fontSize: '22px', fontStyle: 'bold', color: '#ffd166' }).setOrigin(0.5).setDepth(D + 3));
     this.tweens.add({ targets: imgL, x: LX, duration: 450, ease: 'Back.easeOut' });
     this.tweens.add({ targets: imgR, x: RX, duration: 450, ease: 'Back.easeOut' });
 
@@ -1327,13 +1393,8 @@ class Main extends Phaser.Scene {
       if (k >= 1) {
         j.wi++;
         if (j.wi < j.wp.length) { j.a0 = this.aimAngle; j.t2 = 0; j.seg = this.botSeg(j.a0, j.wp[j.wi]); }
-        else { this.aimAngle = j.target; j.phase = 'practice'; j.t3 = 0; j.strokes = Math.floor(rand(1, 3.99)); j.amp = rand(0.07, 0.2); j.sd = rand(0.38, 0.55); }
+        else { this.aimAngle = j.target; j.phase = 'pull'; j.t3 = 0; j.pd = rand(0.55, 0.95); j.hold = rand(0.12, 0.4); }   // no practice strokes: the power cue only moves once, back, then shoots
       }
-    } else if (j.phase === 'practice') {                                              // 1-3 practice strokes: the cue slides back and forth a little
-      j.t3 += dt; const u = j.t3 / j.sd;
-      this.aimAngle = j.target + Math.sin(j.t3 * 9) * 0.0012;
-      if (u >= j.strokes) { this.power = 0; j.phase = 'pull'; j.t3 = 0; j.pd = rand(0.55, 0.95); j.hold = rand(0.12, 0.4); }
-      else this.power = j.amp * (0.5 - 0.5 * Math.cos(2 * Math.PI * u));
     } else if (j.phase === 'pull') {                                                  // pull the cue back, hold a moment, then shoot
       j.t3 += dt; const k = Math.min(1, j.t3 / j.pd), e = k * k * (3 - 2 * k);
       this.power = j.power * e;
@@ -1344,6 +1405,7 @@ class Main extends Phaser.Scene {
 
   /* ---------- input ---------- */
   onDown(p) {
+    if (this.state === 'rooms') { this.roomTap(p); return; }
     if (this.state === 'match') return;
     if (Math.hypot(p.x - GEAR.x, p.y - GEAR.y) <= GEAR.r + 8) { this.toggleMenu(); return; }   // the settings gear works in every state
     if (this.menuOpen) { this.menuTap(p); return; }                                             // while the panel is open, touches only go to it
