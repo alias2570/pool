@@ -844,7 +844,12 @@ const ENTRY_LABEL = '';
 /* Player profile (coins + trophies).  Saved in the phone (localStorage) and in Telegram CloudStorage when available.
    Bots have a trophy rating too, so beating a strong bot gives more trophies; K is small because the opponent is a computer. */
 const START = { coins: 1000, tr: 800 }, BOT_RATING = [700, 1000, 1350, 1750, 2200], ELO_K = 20, PROF_KEY = 'pool_profile';
-const profDefault = () => ({ v: 1, coins: START.coins, tr: START.tr, w: 0, l: 0, games: 0, pending: null, ts: 0 });
+const CH_AVAIL = [1, 2, 3, 4, 5, 6, 7, 20, 50];          // levels that have a character picture in img/fNN.webp (add a number here when you add a picture)
+const TIERS = ['Broken & Poor', 'Basic', 'Community Club', 'League', 'Professional', 'Luxury', 'Wealthy', 'Elite', 'Royal', 'Legendary'];
+const chLevel = lv => { let b = CH_AVAIL[0]; for (const a of CH_AVAIL) if (a <= lv) b = a; return b; };      // best picture for a level
+const chNear = lv => CH_AVAIL.reduce((b, a) => Math.abs(a - lv) < Math.abs(b - lv) ? a : b, CH_AVAIL[0]);
+const tierName = lv => TIERS[Math.min(9, Math.floor((lv - 1) / 5))] + ' · Lv ' + lv;
+const profDefault = () => ({ v: 1, lv: 1, coins: START.coins, tr: START.tr, w: 0, l: 0, games: 0, pending: null, ts: 0 });
 const fmtN = n => Math.round(n).toLocaleString('en-US');
 function cloudStore() {
   try { const tg = window.Telegram && window.Telegram.WebApp; if (tg && tg.CloudStorage && tg.isVersionAtLeast('6.9')) return tg.CloudStorage; } catch (e) {}
@@ -1020,7 +1025,7 @@ class Main extends Phaser.Scene {
     this.rules.turn = Math.random() < 0.5 ? 0 : 1;   // random who breaks
     this.score = [0, 0];
     this.newRack();
-    this.showRooms();                                // choose a table -> pickRoom() -> matchmaking screen -> beginPlay()
+    this.showHome();                                 // home -> PLAY -> choose a table -> pickRoom() -> matchmaking -> VS screen -> beginPlay()
   }
   beginPlay() {
     const R0 = ROOMS[this.room], P = this.prof;
@@ -1211,10 +1216,79 @@ class Main extends Phaser.Scene {
       this.sfx('ball', 500);
       this.applyBot();
       after(MATCH_HOLD, () => {
-        this.tweens.add({ targets: m.objs, alpha: 0, duration: 250, onComplete: () => { this.clearMatch(); this.beginPlay(); } });
+        this.tweens.add({ targets: m.objs, alpha: 0, duration: 250, onComplete: () => { this.clearMatch(); this.showVs(() => this.beginPlay()); } });
       });
     };
     after(t, flip);
+  }
+
+  /* ---------- character pictures (img/fNN.webp, loaded when needed) ---------- */
+  loadChar(lv, cb) {
+    const key = 'ch' + lv; if (this.textures.exists(key)) { cb(true); return; }
+    const url = 'img/f' + String(lv).padStart(2, '0') + '.webp';
+    this.load.once('filecomplete-image-' + key, () => cb(true));
+    this.load.once('loaderror', () => cb(false));
+    this.load.image(key, url); if (!this.load.isLoading()) this.load.start();
+  }
+  /* a character card: the picture cropped to a rounded square (or a plain card if the picture is missing) */
+  charCard(list, key, x, y, size, depth, ok, flip) {
+    const g = this.add.graphics().setDepth(depth); list.push(g);
+    if (ok && this.textures.exists(key)) {
+      const im = this.add.image(x, y, key).setDisplaySize(size, size).setDepth(depth + 1).setFlipX(!!flip); list.push(im);
+      const mk = this.make.graphics({ x: 0, y: 0, add: false }); mk.fillStyle(0xffffff, 1); mk.fillRoundedRect(x - size / 2, y - size / 2, size, size, 22);
+      im.setMask(mk.createGeometryMask()); list.push(mk);
+    } else { g.fillStyle(0x1b2a22, 1); g.fillRoundedRect(x - size / 2, y - size / 2, size, size, 22); }
+    g.lineStyle(4, 0x2a3d31, 1); g.strokeRoundedRect(x - size / 2, y - size / 2, size, size, 22);
+    return g;
+  }
+
+  /* ---------- home screen: your character, coins, trophies, PLAY ---------- */
+  clearHome() { const m = this.hm; if (!m) return; this.tweens.killTweensOf(m.objs); m.objs.forEach(o => o.destroy()); this.hm = null; }
+  showHome() {
+    this.clearHome(); this.state = 'home'; this.botJob = null;
+    const D = 50, m = this.hm = { objs: [] }, add = o => { m.objs.push(o); return o; }, P = this.prof;
+    add(this.add.rectangle(640, 360, 1280, 720, 0x07100b, 0.97).setDepth(D));
+    const lv = chLevel(P.lv), text = (x, y, t, size, col, bold, ox) => add(this.add.text(x, y, t, { fontFamily: 'Arial', fontSize: size + 'px', fontStyle: bold ? 'bold' : 'normal', color: col }).setOrigin(ox === undefined ? 0.5 : ox, 0.5).setDepth(D + 3));
+    const holder = []; this.loadChar(lv, ok => { if (this.hm !== m) return; const l = []; const g = this.charCard(l, 'ch' + lv, 330, 372, 560, D + 1, ok); l.forEach(o => { add(o); o.setAlpha(0); this.tweens.add({ targets: o, alpha: 1, duration: 300 }); }); });
+    text(960, 118, this.names[0], 34, '#e7f3ea', true);
+    text(960, 160, tierName(P.lv), 20, '#ffd166', false);
+    const g = add(this.add.graphics().setDepth(D + 2));
+    g.fillStyle(0x121c17, 1); g.fillRoundedRect(740, 200, 440, 150, 18); g.lineStyle(2, 0x2a3d31, 1); g.strokeRoundedRect(740, 200, 440, 150, 18);
+    text(780, 238, '🪙', 30, '#fff', false, 0); text(830, 238, fmtN(P.coins) + ' coins', 28, '#ffd166', true, 0);
+    text(780, 292, '🏆', 30, '#fff', false, 0); text(830, 292, fmtN(P.tr) + ' trophies', 28, '#e7f3ea', true, 0);
+    text(780, 334, 'Wins ' + P.w + '   Losses ' + P.l, 15, '#8fb39b', false, 0);
+    g.fillStyle(0x4ade80, 1); g.fillRoundedRect(760, 400, 400, 96, 48);
+    g.fillStyle(0xffffff, 0.18); g.fillRoundedRect(768, 406, 384, 38, 38);
+    text(960, 448, 'PLAY', 46, '#0b130f', true);
+    text(960, 540, 'Win matches to earn coins and trophies', 16, '#8fb39b');
+    m.btn = { x0: 760, x1: 1160, y0: 400, y1: 496 };
+    const pulse = this.tweens.add({ targets: g, alpha: 0.88, duration: 700, yoyo: true, repeat: -1 }); m.objs.push({ destroy() { pulse.stop(); }, setAlpha() {} });
+  }
+  homeTap(p) { const m = this.hm; if (!m) return; const b = m.btn; if (p.x >= b.x0 && p.x <= b.x1 && p.y >= b.y0 && p.y <= b.y1) { this.sfx('ball', 420); this.clearHome(); this.showRooms(); } }
+
+  /* ---------- VS screen: both characters, shown once the opponent is found ---------- */
+  showVs(done) {
+    const D = 50, m = { objs: [] }, add = o => { m.objs.push(o); return o; }, P = this.prof, bot = this.bot;
+    this.state = 'vs'; this.botJob = null;
+    const myLv = chLevel(P.lv), oppLv = chNear(Math.max(1, Math.min(50, P.lv + (bot.level - 1) * 3 + Math.round(rand(-2, 2)))));
+    const oppTr = Math.round(BOT_RATING[bot.level] + rand(-60, 60));
+    let ready = 0, ok1 = false, ok2 = false, finished = false;
+    const finish = () => { if (finished) return; finished = true; this.tweens.add({ targets: m.objs, alpha: 0, duration: 250, onComplete: () => { m.objs.forEach(o => o.destroy()); done(); } }); };
+    const build = () => {
+      add(this.add.rectangle(640, 360, 1280, 720, 0x05080a, 0.97).setDepth(D));
+      const lc = [], rc = []; this.charCard(lc, 'ch' + myLv, 330, 330, 470, D + 1, ok1); this.charCard(rc, 'ch' + oppLv, 950, 330, 470, D + 1, ok2, true);
+      lc.forEach(add); rc.forEach(add);
+      const tx = (x, y, t, size, col, bold) => add(this.add.text(x, y, t, { fontFamily: 'Arial', fontSize: size + 'px', fontStyle: bold ? 'bold' : 'normal', color: col }).setOrigin(0.5).setDepth(D + 3));
+      tx(330, 590, this.names[0], 28, '#fff', true); tx(330, 624, tierName(myLv), 16, '#ffd166'); tx(330, 654, '🏆 ' + fmtN(P.tr), 20, '#e7f3ea', true);
+      tx(950, 590, bot.name, 28, '#fff', true); tx(950, 624, tierName(oppLv), 16, '#ffd166'); tx(950, 654, '🏆 ' + fmtN(oppTr), 20, '#e7f3ea', true);
+      const vs = add(this.add.image(640, 300, 'vslogo').setDepth(D + 4).setScale(0)); this.tweens.add({ targets: vs, scale: 1.1, duration: 450, ease: 'Back.easeOut' });
+      tx(640, 410, fmtN(ROOMS[this.room].fee) + ' coins', 20, '#ffd166', true); tx(640, 438, 'Win ' + fmtN(ROOMS[this.room].prize), 15, '#8fb39b');
+      const sl = add(this.add.image(330 - 640, 330, 'ucard').setVisible(false));    // (placeholder so the cards can slide in)
+      m.objs.forEach(o => { if (o !== sl) o.setAlpha(0); }); this.tweens.add({ targets: m.objs.filter(o => o !== sl), alpha: 1, duration: 300 });
+      this.time.delayedCall(2600, finish);
+    };
+    const check = () => { if (++ready === 2) build(); };
+    this.loadChar(myLv, ok => { ok1 = ok; check(); }); this.loadChar(oppLv, ok => { ok2 = ok; check(); });
   }
 
   newRack() {                                     // fresh sprites + balls (also used for a re-rack)
@@ -1489,8 +1563,9 @@ class Main extends Phaser.Scene {
 
   /* ---------- input ---------- */
   onDown(p) {
+    if (this.state === 'home') { this.homeTap(p); return; }
     if (this.state === 'rooms') { this.roomTap(p); return; }
-    if (this.state === 'match') return;
+    if (this.state === 'match' || this.state === 'vs') return;
     if (Math.hypot(p.x - GEAR.x, p.y - GEAR.y) <= GEAR.r + 8) { this.toggleMenu(); return; }   // the settings gear works in every state
     if (this.menuOpen) { this.menuTap(p); return; }                                             // while the panel is open, touches only go to it
     if (this.state !== 'aim' || p.y < 60 || this.isBotTurn()) return;
