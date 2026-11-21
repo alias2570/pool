@@ -833,13 +833,27 @@ const AV_X = [470, 810], AV_R = 19, AV_COL = [0x2f6fdb, 0xd9822b];       // avat
 const TURN_TIME = 30, TURN_WARN = 8;                                      // seconds per turn; the ring turns red and ticks during the last TURN_WARN seconds
 /* Tables (rooms) the player chooses from before the search.  lo..hi = the opponent's skill range (index into BOT_LEVELS),
    entry = what the table costs (placeholder text: all free until leagues / tokens exist). */
+/* fee = coins paid when the game starts, prize = coins the winner gets (the house keeps a cut: 2 x fee > prize), minTr = trophies needed to sit at the table. */
 const ROOMS = [
-  { name: 'Rookie', sub: 'Beginner table', lo: 0, hi: 1, entry: 'FREE', col: 0x4ade80 },
-  { name: 'Club',   sub: 'Club table',     lo: 1, hi: 2, entry: 'FREE', col: 0x4d9bff },
-  { name: 'Pro',    sub: 'Pro table',      lo: 2, hi: 3, entry: 'FREE', col: 0xb36bff },
-  { name: 'Master', sub: 'Master table',   lo: 3, hi: 4, entry: 'FREE', col: 0xffc21a }
+  { name: 'Rookie', sub: 'Beginner table', lo: 0, hi: 1, fee: 100,   prize: 180,   minTr: 0,    col: 0x4ade80 },
+  { name: 'Club',   sub: 'Club table',     lo: 1, hi: 2, fee: 500,   prize: 900,   minTr: 950,  col: 0x4d9bff },
+  { name: 'Pro',    sub: 'Pro table',      lo: 2, hi: 3, fee: 2500,  prize: 4500,  minTr: 1250, col: 0xb36bff },
+  { name: 'Master', sub: 'Master table',   lo: 3, hi: 4, fee: 10000, prize: 18000, minTr: 1700, col: 0xffc21a }
 ];
-const ENTRY_LABEL = 'FREE';                                              // league entry shown under the score (placeholder until leagues exist)
+const ENTRY_LABEL = '';
+/* Player profile (coins + trophies).  Saved in the phone (localStorage) and in Telegram CloudStorage when available.
+   Bots have a trophy rating too, so beating a strong bot gives more trophies; K is small because the opponent is a computer. */
+const START = { coins: 1000, tr: 800 }, BOT_RATING = [700, 1000, 1350, 1750, 2200], ELO_K = 20, PROF_KEY = 'pool_profile';
+const profDefault = () => ({ v: 1, coins: START.coins, tr: START.tr, w: 0, l: 0, games: 0, pending: null, ts: 0 });
+const fmtN = n => Math.round(n).toLocaleString('en-US');
+function cloudStore() {
+  try { const tg = window.Telegram && window.Telegram.WebApp; if (tg && tg.CloudStorage && tg.isVersionAtLeast('6.9')) return tg.CloudStorage; } catch (e) {}
+  return null;
+}
+function loadProfLocal() {
+  try { const p = JSON.parse(localStorage.getItem(PROF_KEY) || 'null'); if (p && typeof p.coins === 'number' && typeof p.tr === 'number') return Object.assign(profDefault(), p); } catch (e) {}
+  return profDefault();
+}                                              // league entry shown under the score (placeholder until leagues exist)
 const AIM_SENS = 0.5, AIM_MIN_R = 30, AIM_REF_R = 350;               // aiming feel (see setAim)
 const HEAD_X = L + 250;                           // head string (break placement limit)
 
@@ -849,6 +863,7 @@ class Main extends Phaser.Scene {
     this.loadSamples();
     this.buildPeopleArt();
     this.vsBot = true; this.bot = null; this.botJob = null; this.mm = null; this.rm = null;
+    this.prof = loadProfLocal(); this.inGame = false; this._toast = null;
     try { this.room = Math.max(0, Math.min(ROOMS.length - 1, +localStorage.getItem('pool_room') || 0)); } catch (e) { this.room = 0; }
     this.eq = []; this.rollCtx = []; this.rollOut = []; this.ori = [];
     for (let n = 0; n <= 15; n++) {                // one rolling-sphere texture per ball number
@@ -895,7 +910,7 @@ class Main extends Phaser.Scene {
     this.drawUserCard(null);
     this._userSet = !!tgUser;
     window.__tgReady = () => {                       // the Telegram script arrived after the game started: pick up the user then
-      initTelegram();
+      initTelegram(); this.syncCloud();
       const u = getTelegramUser(); if (!u || this._userSet) return; this._userSet = true;
       this.names[0] = clip(u.first_name || u.username || 'Player 1');
       this.nameT[0].setText(this.names[0]); this.letterT[0].setText(this.names[0].charAt(0).toUpperCase()); this.drawUserCard(null);
@@ -909,6 +924,8 @@ class Main extends Phaser.Scene {
     if (tgUser && tgUser.photo_url) this.loadAvatar(0, tgUser.photo_url);      // profile photo replaces the letter when it loads
     this.scoreT = this.add.text(CX, BAR_Y - 8, '0 - 0', { fontFamily: 'Arial', fontSize: '24px', fontStyle: 'bold', color: '#fff' }).setOrigin(0.5).setDepth(11);
     this.entryT = this.add.text(CX, BAR_Y + 13, ENTRY_LABEL, { fontFamily: 'Arial', fontSize: '14px', fontStyle: 'bold', color: '#ffd166' }).setOrigin(0.5).setDepth(11);
+    this.profT = this.add.text(14, 706, '', { fontFamily: 'Arial', fontSize: '16px', fontStyle: 'bold', color: '#ffd166' }).setOrigin(0, 0.5).setDepth(10);
+    this.refreshProfT();
     this.msg = this.add.text(CX, 706, '', { fontFamily: 'Arial', fontSize: '19px', color: '#ffd166' }).setOrigin(0.5).setDepth(10);
     const lf = { fontFamily: 'Arial', fontSize: '13px', color: '#cfe8d6' };
     this.add.text(SPIN.x, SPIN.y - SPIN.r - 14, 'SPIN', lf).setOrigin(0.5).setDepth(10);
@@ -938,12 +955,67 @@ class Main extends Phaser.Scene {
     this.input.on('pointerupoutside', () => this.onUp());
 
     initTelegram();
+    this.resolvePending();
+    this.syncCloud();
     this.startGame();
+  }
+
+  /* ---------- profile: coins, trophies, saving ---------- */
+  refreshProfT() { if (this.profT) this.profT.setText('🪙 ' + fmtN(this.prof.coins) + '    🏆 ' + fmtN(this.prof.tr)); }
+  saveProf() {
+    const P = this.prof; P.ts = Date.now(); const js = JSON.stringify(P);
+    try { localStorage.setItem(PROF_KEY, js); } catch (e) {}
+    const cs = cloudStore(); if (cs) { try { cs.setItem(PROF_KEY, js, () => {}); } catch (e) {} }
+  }
+  syncCloud() {                                    // the cloud copy wins only if it is newer than the one on this phone
+    const cs = cloudStore(); if (!cs || this._cloudDone) return; this._cloudDone = true;
+    try {
+      cs.getItem(PROF_KEY, (err, val) => {
+        let c = null; try { c = val ? JSON.parse(val) : null; } catch (e) {}
+        if (!c || typeof c.coins !== 'number' || typeof c.tr !== 'number') { this.saveProf(); return; }
+        if ((c.ts || 0) > (this.prof.ts || 0) && !this.inGame) {
+          this.prof = Object.assign(profDefault(), c);
+          try { localStorage.setItem(PROF_KEY, JSON.stringify(this.prof)); } catch (e) {}
+          this.resolvePending(); this.refreshProfT();
+          if (this.state === 'rooms') { this.clearRooms(); this.showRooms(); }
+        } else if ((c.ts || 0) < (this.prof.ts || 0)) this.saveProf();
+      });
+    } catch (e) {}
+  }
+  toast(t) {
+    if (this._toast) { this.tweens.killTweensOf(this._toast); this._toast.destroy(); }
+    const o = this._toast = this.add.text(640, 650, t, { fontFamily: 'Arial', fontSize: '20px', fontStyle: 'bold', color: '#fff', backgroundColor: '#000000cc', padding: { x: 16, y: 8 } }).setOrigin(0.5).setDepth(80);
+    this.tweens.add({ targets: o, alpha: 0, delay: 1800, duration: 400, onComplete: () => { o.destroy(); if (this._toast === o) this._toast = null; } });
+  }
+  /* A game that was started but never finished (the app was closed, or the player resigned) counts as a loss: the entry is already paid. */
+  resolvePending() {
+    const P = this.prof; if (!P.pending || this.inGame) return;
+    const lvl = Math.max(0, Math.min(BOT_RATING.length - 1, P.pending.lvl | 0));
+    const E = 1 / (1 + Math.pow(10, (BOT_RATING[lvl] - P.tr) / 400)), d = Math.max(1, Math.round(ELO_K * E));
+    P.tr = Math.max(0, P.tr - d); P.l++; P.games++; P.pending = null; this.saveProf(); this.refreshProfT();
+    this.toast('Unfinished game counted as a loss  -' + d + ' 🏆');
+  }
+  /* result of a finished game: pays the prize, moves the trophies */
+  settle(won) {
+    const P = this.prof, R0 = ROOMS[this.room], lvl = this.bot ? this.bot.level : 0;
+    const E = 1 / (1 + Math.pow(10, (BOT_RATING[lvl] - P.tr) / 400));
+    const raw = won ? Math.max(1, Math.round(ELO_K * (1 - E))) : -Math.max(1, Math.round(ELO_K * E));
+    const before = P.tr; P.tr = Math.max(0, P.tr + raw);
+    if (won) { P.coins += R0.prize; P.w++; } else P.l++;
+    P.games++; P.pending = null; this.inGame = false; this.saveProf(); this.refreshProfT();
+    return { prize: won ? R0.prize : 0, d: P.tr - before };
+  }
+  topUp() {                                        // never leave the player stuck: below the cheapest entry the balance is topped up for free
+    const P = this.prof, need = ROOMS[0].fee;
+    if (P.coins < need) { P.coins = need; this.saveProf(); this.refreshProfT(); this.toast('Free top-up: ' + need + ' coins'); }
   }
 
   /* ---------- game flow ---------- */
   startGame() {
-    this.clearMatch(); this.clearRooms(); this.botJob = null;
+    if (this.inGame) {                              // leaving a running game = a loss
+      this.inGame = false; this.resolvePending();
+    }
+    this.clearMatch(); this.clearRooms(); this.botJob = null; this.topUp();
     this.rules.reset();
     this.rules.turn = Math.random() < 0.5 ? 0 : 1;   // random who breaks
     this.score = [0, 0];
@@ -951,7 +1023,10 @@ class Main extends Phaser.Scene {
     this.showRooms();                                // choose a table -> pickRoom() -> matchmaking screen -> beginPlay()
   }
   beginPlay() {
-    this.entryT.setText(ROOMS[this.room].entry);
+    const R0 = ROOMS[this.room], P = this.prof;
+    P.coins = Math.max(0, P.coins - R0.fee); P.pending = { room: this.room, lvl: this.bot ? this.bot.level : 0, t: Date.now() };
+    this.inGame = true; this.saveProf(); this.refreshProfT();
+    this.entryT.setText('Prize ' + fmtN(R0.prize));
     this.state = 'aim'; this.turnLeft = TURN_TIME;
     this.refreshHud();
     this.msg.setText(this.rules.turn === 0 ? 'Break: drag the cue ball behind the line if you like, then aim' : this.names[1] + ' breaks');
@@ -970,6 +1045,7 @@ class Main extends Phaser.Scene {
     this.state = 'rooms'; this.botJob = null;
     add(this.add.rectangle(640, 360, 1280, 720, 0x05080a, 0.92).setDepth(D));
     add(this.add.text(640, 78, 'Choose your table', { fontFamily: 'Arial', fontSize: '36px', fontStyle: 'bold', color: '#e7f3ea' }).setOrigin(0.5).setDepth(D + 1));
+    add(this.add.text(1250, 40, '🪙 ' + fmtN(this.prof.coins) + '    🏆 ' + fmtN(this.prof.tr), { fontFamily: 'Arial', fontSize: '20px', fontStyle: 'bold', color: '#ffd166' }).setOrigin(1, 0.5).setDepth(D + 1));
     add(this.add.text(640, 118, 'Higher tables = tougher opponents', { fontFamily: 'Arial', fontSize: '17px', color: '#8fb39b' }).setOrigin(0.5).setDepth(D + 1));
     const x0 = 640 - (4 * CWD + 3 * GAP) / 2 + CWD / 2;
     const txt = (x, y, t, size, col, bold) => add(this.add.text(x, y, t, { fontFamily: 'Arial', fontSize: size + 'px', fontStyle: bold ? 'bold' : 'normal', color: col }).setOrigin(0.5).setDepth(D + 3));
@@ -994,9 +1070,12 @@ class Main extends Phaser.Scene {
       }
       txt(x, top + 236, BOT_LEVELS[R0.lo].name + ' – ' + BOT_LEVELS[R0.hi].name, 16, '#e7f3ea');
       g.fillStyle(0x0b130f, 1); g.fillRoundedRect(x - 52, top + 262, 104, 34, 17); g.lineStyle(1, 0x2a3d31, 1); g.strokeRoundedRect(x - 52, top + 262, 104, 34, 17);
-      txt(x, top + 279, R0.entry, 18, '#ffd166', true);
-      g.fillStyle(R0.col, 1); g.fillRoundedRect(x - 80, top + 318, 160, 40, 20);
-      txt(x, top + 338, 'PLAY', 20, '#0b130f', true);
+      txt(x, top + 279, fmtN(R0.fee) + ' coins', 17, '#ffd166', true);
+      txt(x, top + 307, 'Win ' + fmtN(R0.prize), 13, '#8fb39b');
+      const noTr = this.prof.tr < R0.minTr, noCoin = this.prof.coins < R0.fee, lock = noTr || noCoin;
+      g.fillStyle(lock ? 0x2a3d31 : R0.col, 1); g.fillRoundedRect(x - 80, top + 318, 160, 40, 20);
+      txt(x, top + 338, noTr ? 'Reach ' + fmtN(R0.minTr) + ' 🏆' : noCoin ? 'Need ' + fmtN(R0.fee - this.prof.coins) + ' more' : 'PLAY', noTr || noCoin ? 15 : 20, lock ? '#cfe8d6' : '#0b130f', true);
+      if (lock) { g.fillStyle(0x000000, 0.35); g.fillRoundedRect(x - CWD / 2, top, CWD, 308, { tl: 18, tr: 18, bl: 0, br: 0 }); }
       m.cards.push({ i, x0: x - CWD / 2, x1: x + CWD / 2, y0: top, y1: top + CH });
     });
     m.objs.forEach(o => { o.setAlpha(0); }); this.tweens.add({ targets: m.objs, alpha: 1, duration: 250 });
@@ -1007,6 +1086,9 @@ class Main extends Phaser.Scene {
     if (c) this.pickRoom(c.i);
   }
   pickRoom(i) {
+    const R0 = ROOMS[i];
+    if (this.prof.tr < R0.minTr) { this.toast('Reach ' + fmtN(R0.minTr) + ' trophies to play at ' + R0.name); return; }
+    if (this.prof.coins < R0.fee) { this.toast('Not enough coins: you need ' + fmtN(R0.fee - this.prof.coins) + ' more'); return; }
     this.room = i; try { localStorage.setItem('pool_room', String(i)); } catch (e) {}
     this.sfx('ball', 400);
     this.clearRooms();
@@ -1097,7 +1179,8 @@ class Main extends Phaser.Scene {
     const nameR = add(this.add.text(RX, CYY + CW / 2 + 42, bot.name, nf).setOrigin(0.5).setDepth(D + 2).setAlpha(0));
     const vs = add(this.add.image(640, CYY - 10, 'vslogo').setDepth(D + 4).setScale(0));
     const fee = add(this.add.graphics().setDepth(D + 2)); fee.fillStyle(0x14181c, 1); fee.fillRoundedRect(598, CYY + 40, 84, 84, 12); fee.lineStyle(2, 0x3a424a, 1); fee.strokeRoundedRect(598, CYY + 40, 84, 84, 12);
-    add(this.add.text(640, CYY + 82, ROOMS[this.room].entry, { fontFamily: 'Arial', fontSize: '22px', fontStyle: 'bold', color: '#ffd166' }).setOrigin(0.5).setDepth(D + 3));
+    add(this.add.text(640, CYY + 74, fmtN(ROOMS[this.room].fee), { fontFamily: 'Arial', fontSize: '24px', fontStyle: 'bold', color: '#ffd166' }).setOrigin(0.5).setDepth(D + 3));
+    add(this.add.text(640, CYY + 100, 'coins entry', { fontFamily: 'Arial', fontSize: '12px', color: '#8fb39b' }).setOrigin(0.5).setDepth(D + 3));
     this.tweens.add({ targets: imgL, x: LX, duration: 450, ease: 'Back.easeOut' });
     this.tweens.add({ targets: imgR, x: RX, duration: 450, ease: 'Back.easeOut' });
 
@@ -1230,8 +1313,9 @@ class Main extends Phaser.Scene {
     if (this.rules.winner >= 0) {
       this.state = 'over'; this.score[this.rules.winner]++;
       this.recordResult(this.rules.winner === 0);
+      const rs = this.settle(this.rules.winner === 0);
       const why = res.reason ? ' (' + res.reason + ')' : '';
-      this.msg.setText(who(this.rules.winner) + ' wins!' + why + '  Tap the gear > New game to play again');
+      this.msg.setText(who(this.rules.winner) + ' wins!' + why + '   ' + (rs.prize ? '+' + fmtN(rs.prize) + ' coins   ' : 'Entry lost   ') + (rs.d >= 0 ? '+' : '') + rs.d + ' 🏆   (gear > New game)');
       this.refreshHud(); return;
     }
     let text;
@@ -1874,7 +1958,7 @@ class Main extends Phaser.Scene {
     for (let i = 1; i < 3; i++) m.lineBetween(MENU.x + 12, MENU.y + 8 + i * MENU.rowH, MENU.x + MENU.w - 12, MENU.y + 8 + i * MENU.rowH);
     this.menuT[0].setText('Sound: ' + (this.soundOn ? 'ON' : 'OFF')).setColor(this.soundOn ? '#e7f3ea' : '#8fb39b');
     this.menuT[1].setText('Show jaws: ' + (this.showJaws ? 'ON' : 'OFF'));
-    this.menuT[2].setText('New game').setColor('#ffd166');
+    this.menuT[2].setText(this.inGame ? 'Resign & new game' : 'New game').setColor(this.inGame ? '#ff8a7a' : '#ffd166');
   }
 
   drawSpin() {                                    // drawn on the same graphics object, after the slider
