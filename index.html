@@ -848,6 +848,8 @@ const CH_AVAIL = [1, 2, 3, 4, 5, 6, 7, 20, 50];          // levels that have a c
 const TIERS = ['Broken & Poor', 'Basic', 'Community Club', 'League', 'Professional', 'Luxury', 'Wealthy', 'Elite', 'Royal', 'Legendary'];
 const chLevel = lv => { let b = CH_AVAIL[0]; for (const a of CH_AVAIL) if (a <= lv) b = a; return b; };      // best picture for a level
 const chNear = lv => CH_AVAIL.reduce((b, a) => Math.abs(a - lv) < Math.abs(b - lv) ? a : b, CH_AVAIL[0]);
+const upCost = lv => Math.round(100 * Math.pow(lv, 1.75) / 50) * 50;         // coins to upgrade TO this level
+const upTrophies = lv => 800 + Math.round((lv - 1) * 30);                    // trophies needed for it
 const tierName = lv => TIERS[Math.min(9, Math.floor((lv - 1) / 5))] + ' · Lv ' + lv;
 const profDefault = () => ({ v: 1, lv: 1, coins: START.coins, tr: START.tr, w: 0, l: 0, games: 0, pending: null, ts: 0 });
 const fmtN = n => Math.round(n).toLocaleString('en-US');
@@ -1249,7 +1251,7 @@ class Main extends Phaser.Scene {
     const D = 50, m = this.hm = { objs: [] }, add = o => { m.objs.push(o); return o; }, P = this.prof;
     add(this.add.rectangle(640, 360, 1280, 720, 0x07100b, 0.97).setDepth(D));
     const lv = chLevel(P.lv), text = (x, y, t, size, col, bold, ox) => add(this.add.text(x, y, t, { fontFamily: 'Arial', fontSize: size + 'px', fontStyle: bold ? 'bold' : 'normal', color: col }).setOrigin(ox === undefined ? 0.5 : ox, 0.5).setDepth(D + 3));
-    const holder = []; this.loadChar(lv, ok => { if (this.hm !== m) return; const l = []; const g = this.charCard(l, 'ch' + lv, 330, 372, 560, D + 1, ok); l.forEach(o => { add(o); o.setAlpha(0); this.tweens.add({ targets: o, alpha: 1, duration: 300 }); }); });
+    const holder = []; this.loadChar(lv, ok => { if (this.hm !== m) return; const l = []; this.charCard(l, 'ch' + lv, 330, 372, 560, D + 1, ok); m.card = l; l.forEach(o => { add(o); o.setAlpha(0); this.tweens.add({ targets: o, alpha: 1, duration: 300 }); }); });
     text(960, 118, this.names[0], 34, '#e7f3ea', true);
     text(960, 160, tierName(P.lv), 20, '#ffd166', false);
     const g = add(this.add.graphics().setDepth(D + 2));
@@ -1260,11 +1262,65 @@ class Main extends Phaser.Scene {
     g.fillStyle(0x4ade80, 1); g.fillRoundedRect(760, 400, 400, 96, 48);
     g.fillStyle(0xffffff, 0.18); g.fillRoundedRect(768, 406, 384, 38, 38);
     text(960, 448, 'PLAY', 46, '#0b130f', true);
-    text(960, 540, 'Win matches to earn coins and trophies', 16, '#8fb39b');
-    m.btn = { x0: 760, x1: 1160, y0: 400, y1: 496 };
+    const nx = CH_AVAIL.find(a => a > P.lv), cost = nx ? upCost(nx) : 0, needTr = nx ? upTrophies(nx) : 0;
+    const noCoin = nx && P.coins < cost, noTr = nx && P.tr < needTr, can = nx && !noCoin && !noTr;
+    g.fillStyle(can ? 0xffc21a : 0x23332a, 1); g.fillRoundedRect(760, 514, 400, 64, 32);
+    if (can) { g.fillStyle(0xffffff, 0.22); g.fillRoundedRect(768, 518, 384, 24, 24); }
+    text(960, 546, !nx ? 'MAX LEVEL' : can ? 'UPGRADE   ' + fmtN(cost) + ' coins' : noTr ? 'Upgrade needs ' + fmtN(needTr) + ' trophies' : 'Upgrade: ' + fmtN(cost - P.coins) + ' more coins', can ? 26 : 18, can ? '#2b1a00' : '#8fb39b', true);
+    if (nx) text(960, 600, 'Next: ' + tierName(nx), 15, '#8fb39b');
+    text(960, 632, 'Win matches to earn coins and trophies', 14, '#5f7c6a');
+    m.btn = { x0: 760, x1: 1160, y0: 400, y1: 496 }; m.up = { x0: 760, x1: 1160, y0: 514, y1: 578, nx, cost, needTr, can, noTr, noCoin };
     const pulse = this.tweens.add({ targets: g, alpha: 0.88, duration: 700, yoyo: true, repeat: -1 }); m.objs.push({ destroy() { pulse.stop(); }, setAlpha() {} });
   }
-  homeTap(p) { const m = this.hm; if (!m) return; const b = m.btn; if (p.x >= b.x0 && p.x <= b.x1 && p.y >= b.y0 && p.y <= b.y1) { this.sfx('ball', 420); this.clearHome(); this.showRooms(); } }
+  homeTap(p) {
+    const m = this.hm; if (!m || this.upBusy) return; const b = m.btn, u = m.up, inb = r => p.x >= r.x0 && p.x <= r.x1 && p.y >= r.y0 && p.y <= r.y1;
+    if (inb(b)) { this.sfx('ball', 420); this.clearHome(); this.showRooms(); return; }
+    if (inb(u)) {
+      if (!u.nx) { this.toast('You are at the top level'); return; }
+      if (u.noTr) { this.toast('Reach ' + fmtN(u.needTr) + ' trophies first (you have ' + fmtN(this.prof.tr) + ')'); return; }
+      if (u.noCoin) { this.toast('Not enough coins: ' + fmtN(u.cost - this.prof.coins) + ' more'); return; }
+      this.doUpgrade(u.nx, u.cost);
+    }
+  }
+  /* upgrade sequence: charge (sparks fly in) -> flash + rings + shake -> new picture -> banner -> home refreshes */
+  doUpgrade(nx, cost) {
+    const P = this.prof, m = this.hm, D = 50, cx = 330, cy = 372, S = 560, fx = [], A = o => { fx.push(o); return o; };
+    this.upBusy = true; P.coins -= cost; P.lv = nx; this.saveProf(); this.refreshProfT();
+    this.loadChar(nx, ok => {
+      if (this.hm !== m) { this.upBusy = false; return; }
+      const flash = A(this.add.rectangle(cx, cy, S, S, 0xfff3b8, 0).setDepth(D + 8));
+      const glow = A(this.add.circle(cx, cy + 40, 30, 0xffe58a, 0.7).setDepth(D + 7).setScale(0.3));
+      this.tweens.add({ targets: glow, scale: 7, alpha: 0.9, duration: 800, ease: 'Sine.easeIn' });
+      this.tweens.add({ targets: flash, alpha: 0.5, duration: 800, ease: 'Sine.easeIn' });
+      for (let i = 0; i < 26; i++) {                                                    // charge: sparks fly in
+        const a = rand(0, 6.283), r = rand(180, 330), st = A(this.add.star(cx + Math.cos(a) * r, cy + 40 + Math.sin(a) * r, 4, 2, rand(5, 9), 0xffe08a).setDepth(D + 9));
+        this.tweens.add({ targets: st, x: cx, y: cy + 40, alpha: 0, duration: rand(450, 800), delay: rand(0, 250), ease: 'Sine.easeIn' });
+      }
+      this.sfx('ball', 300);
+      this.time.delayedCall(850, () => {
+        this.cameras.main.shake(450, 0.006); this.sfx('ball', 700);
+        flash.setAlpha(1); this.tweens.add({ targets: flash, alpha: 0, duration: 900, ease: 'Sine.easeOut' });
+        glow.destroy();
+        for (let k = 0; k < 2; k++) {                                                    // shockwave rings
+          const rg = A(this.add.circle(cx, cy + 40, 60).setStrokeStyle(5, 0xffe08a, 1).setFillStyle(0, 0).setDepth(D + 8));
+          this.tweens.add({ targets: rg, scale: 7, alpha: 0, duration: 1100, delay: k * 150, ease: 'Cubic.easeOut' });
+        }
+        for (let i = 0; i < 80; i++) {                                                   // burst
+          const a = rand(0, 6.283), v = rand(120, 380), st = A(this.add.star(cx, cy + 40, 4, 2, rand(4, 10), i % 3 ? 0xffd24a : 0xffffff).setDepth(D + 9));
+          this.tweens.add({ targets: st, x: cx + Math.cos(a) * v, y: cy + 40 + Math.sin(a) * v + 60, alpha: 0, angle: rand(-180, 180), duration: rand(700, 1400), ease: 'Cubic.easeOut' });
+        }
+        this.time.delayedCall(180, () => {                                                // swap the picture under the flash
+          if (m.card) m.card.forEach(o => o.destroy());
+          const l = []; this.charCard(l, 'ch' + nx, cx, cy, S, D + 1, ok); m.card = l; m.objs.push(...l);
+          const im = l.find(o => o.type === 'Image'); if (im) { im.setScale(im.scaleX * 1.08); this.tweens.add({ targets: im, scaleX: S / im.width, scaleY: S / im.height, duration: 900, ease: 'Cubic.easeOut' }); }
+          const bn = A(this.add.text(cx, 96, 'UPGRADED!', { fontFamily: 'Arial', fontSize: '34px', fontStyle: 'bold', color: '#ffd166', backgroundColor: '#000000cc', padding: { x: 22, y: 8 } }).setOrigin(0.5).setDepth(D + 10).setAlpha(0));
+          const bs = A(this.add.text(cx, 142, tierName(nx), { fontFamily: 'Arial', fontSize: '20px', fontStyle: 'bold', color: '#fff', backgroundColor: '#000000cc', padding: { x: 14, y: 5 } }).setOrigin(0.5).setDepth(D + 10).setAlpha(0));
+          this.tweens.add({ targets: [bn, bs], alpha: 1, duration: 400 });
+        });
+        this.time.delayedCall(2600, () => { fx.forEach(o => { if (o && o.destroy) o.destroy(); }); this.upBusy = false; if (this.hm === m) this.showHome(); });
+      });
+    });
+  }
 
   /* ---------- VS screen: both characters, shown once the opponent is found ---------- */
   showVs(done) {
