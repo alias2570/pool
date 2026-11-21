@@ -848,6 +848,12 @@ const CH_AVAIL = [1, 2, 3, 4, 5, 6, 7, 20, 50];          // levels that have a c
 const TIERS = ['Broken & Poor', 'Basic', 'Community Club', 'League', 'Professional', 'Luxury', 'Wealthy', 'Elite', 'Royal', 'Legendary'];
 const chLevel = lv => { let b = CH_AVAIL[0]; for (const a of CH_AVAIL) if (a <= lv) b = a; return b; };      // best picture for a level
 const chNear = lv => CH_AVAIL.reduce((b, a) => Math.abs(a - lv) < Math.abs(b - lv) ? a : b, CH_AVAIL[0]);
+
+/* ---- look & feel: colour helpers ---- */
+function shadeCol(n, k) {                          // n = 0xRRGGBB, k = -1..1 (towards black / towards white)
+  const t = k > 0 ? 255 : 0, a = Math.abs(k), f = v => Math.round(v + (t - v) * a);
+  return 'rgb(' + f(n >> 16 & 255) + ',' + f(n >> 8 & 255) + ',' + f(n & 255) + ')';
+}
 const upCost = lv => Math.round(100 * Math.pow(lv, 1.75) / 50) * 50;         // coins to upgrade TO this level
 const upTrophies = lv => 800 + Math.round((lv - 1) * 30);                    // trophies needed for it
 const tierName = lv => TIERS[Math.min(9, Math.floor((lv - 1) / 5))] + ' · Lv ' + lv;
@@ -1050,47 +1056,57 @@ class Main extends Phaser.Scene {
     const D = 50, CWD = 220, CH = 380, GAP = 22, CYY = 392;
     const m = this.rm = { objs: [], cards: [] }, add = o => { m.objs.push(o); return o; };
     this.state = 'rooms'; this.botJob = null;
-    add(this.add.rectangle(640, 360, 1280, 720, 0x05080a, 0.92).setDepth(D));
-    add(this.add.text(640, 78, 'Choose your table', { fontFamily: 'Arial', fontSize: '36px', fontStyle: 'bold', color: '#e7f3ea' }).setOrigin(0.5).setDepth(D + 1));
-    add(this.add.text(1250, 40, '🪙 ' + fmtN(this.prof.coins) + '    🏆 ' + fmtN(this.prof.tr), { fontFamily: 'Arial', fontSize: '20px', fontStyle: 'bold', color: '#ffd166' }).setOrigin(1, 0.5).setDepth(D + 1));
-    add(this.add.text(640, 118, 'Higher tables = tougher opponents', { fontFamily: 'Arial', fontSize: '17px', color: '#8fb39b' }).setOrigin(0.5).setDepth(D + 1));
+    add(this.add.image(640, 360, this.bgKey('rooms', (c, w, h) => {
+      const g = c.createRadialGradient(640, 250, 40, 640, 330, 760); g.addColorStop(0, '#16394a'); g.addColorStop(0.55, '#0a1a22'); g.addColorStop(1, '#03070a');
+      c.fillStyle = g; c.fillRect(0, 0, w, h);
+      for (let i = 0; i < 6; i++) { c.fillStyle = 'rgba(120,200,255,0.025)'; c.beginPath(); c.moveTo(200 + i * 190, 0); c.lineTo(260 + i * 190, 0); c.lineTo(80 + i * 190, 720); c.lineTo(20 + i * 190, 720); c.fill(); }
+    })).setDepth(D));
+    this.dust(m.objs, 18, 0x9fd8ff);
+    this.title(m.objs, 640, 66, 'Choose your table', 42, D + 3);
+    add(this.add.text(640, 108, 'Higher tables = tougher opponents, bigger prizes', { fontFamily: 'Arial', fontSize: '17px', color: '#8fb3c4' }).setOrigin(0.5).setDepth(D + 3));
+    const back = this.makeBtn(m.objs, 98, 52, 128, 42, 0x2d4a58, '‹  Back', 19, '#e7f3ea', D + 3); m.back = { x0: 34, x1: 162, y0: 30, y1: 74, ct: back };
+    const chip = add(this.add.image(1128, 52, this.panelKey('chip250', 250, 44, 22, '#1b2f3a', '#0c1a22', 'rgba(255,209,102,0.55)')).setDepth(D + 2));
+    add(this.add.text(1128, 52, '🪙 ' + fmtN(this.prof.coins) + '     🏆 ' + fmtN(this.prof.tr), { fontFamily: 'Arial', fontSize: '19px', fontStyle: 'bold', color: '#ffd166' }).setOrigin(0.5).setDepth(D + 3));
     const x0 = 640 - (4 * CWD + 3 * GAP) / 2 + CWD / 2;
     const txt = (x, y, t, size, col, bold) => add(this.add.text(x, y, t, { fontFamily: 'Arial', fontSize: size + 'px', fontStyle: bold ? 'bold' : 'normal', color: col }).setOrigin(0.5).setDepth(D + 3));
     const hex = c => '#' + c.toString(16).padStart(6, '0');
     ROOMS.forEach((R0, i) => {
       const x = x0 + i * (CWD + GAP), top = CYY - CH / 2, last = i === this.room;
-      const g = add(this.add.graphics().setDepth(D + 2));
-      g.fillStyle(0x121c17, 1); g.fillRoundedRect(x - CWD / 2, top, CWD, CH, 18);
-      g.fillStyle(R0.col, 0.18); g.fillRoundedRect(x - CWD / 2, top, CWD, 112, { tl: 18, tr: 18, bl: 0, br: 0 });
-      g.lineStyle(last ? 4 : 2, R0.col, last ? 1 : 0.55); g.strokeRoundedRect(x - CWD / 2, top, CWD, CH, 18);
+      const noTr = this.prof.tr < R0.minTr, noCoin = this.prof.coins < R0.fee, lock = noTr || noCoin;
+      add(this.add.image(x, CYY, this.tex('card' + i + (lock ? 'L' : last ? 'S' : 'N'), CWD + 60, CH + 60, c => {
+        c.shadowColor = hex(R0.col); c.shadowBlur = last && !lock ? 34 : 14;
+        const g = c.createLinearGradient(0, 30, 0, 30 + CH); g.addColorStop(0, shadeCol(R0.col, -0.62)); g.addColorStop(0.45, '#0e1713'); g.addColorStop(1, '#070d0a');
+        c.fillStyle = g; rr(c, 30, 30, CWD, CH, 20); c.fill(); c.shadowBlur = 0;
+        const hd = c.createLinearGradient(0, 30, 0, 142); hd.addColorStop(0, hex(R0.col) + '66'); hd.addColorStop(1, hex(R0.col) + '00'); c.fillStyle = hd; rr(c, 30, 30, CWD, 112, 20); c.fill();
+        c.lineWidth = last && !lock ? 4 : 2; c.strokeStyle = hex(R0.col) + (lock ? '66' : 'ee'); rr(c, 30, 30, CWD, CH, 20); c.stroke();
+      })).setDepth(D + 2));
+      const g = add(this.add.graphics().setDepth(D + 3));
       for (let k = 0; k <= i; k++) {                                              // stars = table rank
         const sx = x + (k - i / 2) * 30, sy = top + 38; g.fillStyle(R0.col, 1); g.beginPath();
         for (let q = 0; q < 10; q++) { const a = -Math.PI / 2 + q * Math.PI / 5, r = q % 2 ? 6 : 14; g.lineTo(sx + Math.cos(a) * r, sy + Math.sin(a) * r); }
         g.closePath(); g.fillPath();
       }
-      txt(x, top + 82, R0.name, 32, hex(R0.col), true);
-      txt(x, top + 138, R0.sub, 15, '#8fb39b');
+      const nm = txt(x, top + 82, R0.name, 33, hex(R0.col), true); nm.setShadow(0, 2, 'rgba(0,0,0,0.6)', 4, false, true);
+      txt(x, top + 138, R0.sub, 15, '#9cb7a6');
       g.lineStyle(1, 0x2a3d31, 1); g.lineBetween(x - 80, top + 158, x + 80, top + 158);
       txt(x, top + 182, 'Opponents', 13, '#8fb39b');
       for (let k = 0; k < BOT_LEVELS.length; k++) {                               // five pips = the skill range of this table
         const on = k >= R0.lo && k <= R0.hi; g.fillStyle(on ? R0.col : 0x23332a, 1); g.fillCircle(x + (k - 2) * 24, top + 208, 7);
       }
       txt(x, top + 236, BOT_LEVELS[R0.lo].name + ' – ' + BOT_LEVELS[R0.hi].name, 16, '#e7f3ea');
-      g.fillStyle(0x0b130f, 1); g.fillRoundedRect(x - 52, top + 262, 104, 34, 17); g.lineStyle(1, 0x2a3d31, 1); g.strokeRoundedRect(x - 52, top + 262, 104, 34, 17);
+      add(this.add.image(x, top + 279, this.panelKey('fee112', 112, 34, 17, '#2a2412', '#15110a', 'rgba(255,209,102,0.5)')).setDepth(D + 3));
       txt(x, top + 279, fmtN(R0.fee) + ' coins', 17, '#ffd166', true);
-      txt(x, top + 307, 'Win ' + fmtN(R0.prize), 13, '#8fb39b');
-      const noTr = this.prof.tr < R0.minTr, noCoin = this.prof.coins < R0.fee, lock = noTr || noCoin;
-      g.fillStyle(lock ? 0x2a3d31 : R0.col, 1); g.fillRoundedRect(x - 80, top + 318, 160, 40, 20);
-      txt(x, top + 338, noTr ? 'Reach ' + fmtN(R0.minTr) + ' 🏆' : noCoin ? 'Need ' + fmtN(R0.fee - this.prof.coins) + ' more' : 'PLAY', noTr || noCoin ? 15 : 20, lock ? '#cfe8d6' : '#0b130f', true);
-      if (lock) { g.fillStyle(0x000000, 0.35); g.fillRoundedRect(x - CWD / 2, top, CWD, 308, { tl: 18, tr: 18, bl: 0, br: 0 }); }
-      m.cards.push({ i, x0: x - CWD / 2, x1: x + CWD / 2, y0: top, y1: top + CH });
+      txt(x, top + 307, 'Win ' + fmtN(R0.prize), 13, '#9cb7a6');
+      const bt = this.makeBtn(m.objs, x, top + 338, 160, 40, lock ? 0x34443a : R0.col, noTr ? 'Reach ' + fmtN(R0.minTr) + ' 🏆' : noCoin ? 'Need ' + fmtN(R0.fee - this.prof.coins) + ' more' : 'PLAY', lock ? 15 : 20, lock ? '#b7cdbf' : '#0b130f', D + 4);
+      m.cards.push({ i, x0: x - CWD / 2, x1: x + CWD / 2, y0: top, y1: top + CH, bt });
     });
-    m.objs.forEach(o => { o.setAlpha(0); }); this.tweens.add({ targets: m.objs, alpha: 1, duration: 250 });
+    m.objs.forEach(o => { if (o.setAlpha) o.setAlpha(0); }); this.tweens.add({ targets: m.objs.filter(o => o.setAlpha && o.type !== 'Arc'), alpha: 1, duration: 280 });
   }
   roomTap(p) {
     const m = this.rm; if (!m) return;
+    const bk = m.back; if (p.x >= bk.x0 && p.x <= bk.x1 && p.y >= bk.y0 && p.y <= bk.y1) { this.press(bk.ct); this.sfx('ball', 380); this.time.delayedCall(90, () => { if (this.rm === m) { this.clearRooms(); this.showHome(); } }); return; }
     const c = m.cards.find(c => p.x >= c.x0 && p.x <= c.x1 && p.y >= c.y0 && p.y <= c.y1);
-    if (c) this.pickRoom(c.i);
+    if (c) { this.press(c.bt); this.pickRoom(c.i); }
   }
   pickRoom(i) {
     const R0 = ROOMS[i];
@@ -1224,6 +1240,49 @@ class Main extends Phaser.Scene {
     after(t, flip);
   }
 
+  /* ---------- look & feel helpers (drawn with canvas so gradients, glows and gloss are possible) ---------- */
+  tex(key, w, h, draw) { if (this.textures.exists(key)) return key; const t = this.textures.createCanvas(key, w, h); draw(t.getContext(), w, h); t.refresh(); return key; }
+  btnKey(w, h, col) {                              // glossy 3-D button: shadow, dark lower edge, gradient body, highlight, thin light border
+    return this.tex('btn' + w + 'x' + h + '_' + col.toString(16), w + 16, h + 20, c => {
+      const R = Math.min(h / 2, 30);
+      c.fillStyle = 'rgba(0,0,0,0.45)'; rr(c, 8, 13, w, h, R); c.fill();
+      c.fillStyle = shadeCol(col, -0.5); rr(c, 8, 13, w, h - 2, R); c.fill();
+      const g = c.createLinearGradient(0, 8, 0, 8 + h); g.addColorStop(0, shadeCol(col, 0.28)); g.addColorStop(1, shadeCol(col, -0.12));
+      c.fillStyle = g; rr(c, 8, 8, w, h - 1, R); c.fill();
+      const gl = c.createLinearGradient(0, 9, 0, 9 + h * 0.5); gl.addColorStop(0, 'rgba(255,255,255,0.55)'); gl.addColorStop(1, 'rgba(255,255,255,0)');
+      c.fillStyle = gl; rr(c, 14, 10, w - 12, h * 0.46, Math.min(R, h * 0.23)); c.fill();
+      c.lineWidth = 2; c.strokeStyle = 'rgba(255,255,255,0.38)'; rr(c, 8, 8, w, h - 1, R); c.stroke();
+    });
+  }
+  makeBtn(list, x, y, w, h, col, label, size, tcol, depth) {
+    const img = this.add.image(0, -2, this.btnKey(w, h, col));
+    const t = this.add.text(0, -3, label, { fontFamily: 'Arial', fontSize: size + 'px', fontStyle: 'bold', color: tcol }).setOrigin(0.5);
+    t.setShadow(0, 2, 'rgba(0,0,0,0.45)', 3, false, true);
+    const ct = this.add.container(x, y, [img, t]).setDepth(depth); list.push(ct); return ct;
+  }
+  panelKey(key, w, h, r, c1, c2, stroke, glow) {   // rounded gradient panel with a soft outer glow
+    return this.tex(key, w + 40, h + 40, c => {
+      if (glow) { c.shadowColor = glow; c.shadowBlur = 22; }
+      const g = c.createLinearGradient(0, 20, 0, 20 + h); g.addColorStop(0, c1); g.addColorStop(1, c2);
+      c.fillStyle = g; rr(c, 20, 20, w, h, r); c.fill(); c.shadowBlur = 0;
+      c.lineWidth = 2; c.strokeStyle = stroke; rr(c, 20, 20, w, h, r); c.stroke();
+      const gl = c.createLinearGradient(0, 20, 0, 20 + h * 0.3); gl.addColorStop(0, 'rgba(255,255,255,0.10)'); gl.addColorStop(1, 'rgba(255,255,255,0)');
+      c.fillStyle = gl; rr(c, 22, 22, w - 4, h * 0.3, Math.min(r, h * 0.14)); c.fill();
+    });
+  }
+  bgKey(name, draw) { return this.tex('bg_' + name, 1280, 720, draw); }
+  press(ct) { if (ct) this.tweens.add({ targets: ct, scaleX: 0.94, scaleY: 0.94, duration: 70, yoyo: true }); }
+  dust(list, n, col) {                             // slow floating specks
+    for (let i = 0; i < n; i++) {
+      const d = this.add.circle(rand(0, 1280), rand(80, 720), rand(1.2, 3), col, rand(0.1, 0.35)).setDepth(51); list.push(d);
+      this.tweens.add({ targets: d, y: d.y - rand(60, 160), alpha: 0.02, duration: rand(2600, 5200), delay: rand(0, 2000), yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+    }
+  }
+  title(list, x, y, t, size, depth) {
+    const o = this.add.text(x, y, t, { fontFamily: 'Arial', fontSize: size + 'px', fontStyle: 'bold', color: '#f4fbf6' }).setOrigin(0.5).setDepth(depth);
+    o.setShadow(0, 3, 'rgba(0,0,0,0.6)', 6, false, true); list.push(o); return o;
+  }
+
   /* ---------- character pictures (img/fNN.webp, loaded when needed) ---------- */
   loadChar(lv, cb) {
     const key = 'ch' + lv; if (this.textures.exists(key)) { cb(true); return; }
@@ -1249,33 +1308,55 @@ class Main extends Phaser.Scene {
   showHome() {
     this.clearHome(); this.state = 'home'; this.botJob = null;
     const D = 50, m = this.hm = { objs: [] }, add = o => { m.objs.push(o); return o; }, P = this.prof;
-    add(this.add.rectangle(640, 360, 1280, 720, 0x07100b, 0.97).setDepth(D));
+    add(this.add.image(640, 360, this.bgKey('home', (c, w, h) => {
+      const g = c.createRadialGradient(330, 360, 40, 330, 380, 760); g.addColorStop(0, '#1d5a3b'); g.addColorStop(0.5, '#0c2418'); g.addColorStop(1, '#040b07');
+      c.fillStyle = g; c.fillRect(0, 0, w, h);
+      const r = c.createLinearGradient(700, 0, 1280, 0); r.addColorStop(0, 'rgba(0,0,0,0)'); r.addColorStop(1, 'rgba(0,0,0,0.45)'); c.fillStyle = r; c.fillRect(0, 0, w, h);
+      for (let i = 0; i < 7; i++) { c.fillStyle = 'rgba(255,230,160,0.03)'; c.beginPath(); c.moveTo(80 + i * 120, 0); c.lineTo(130 + i * 120, 0); c.lineTo(-100 + i * 120, 720); c.lineTo(-150 + i * 120, 720); c.fill(); }
+    })).setDepth(D));
+    this.dust(m.objs, 22, 0xffe9a8);
     const lv = chLevel(P.lv), text = (x, y, t, size, col, bold, ox) => add(this.add.text(x, y, t, { fontFamily: 'Arial', fontSize: size + 'px', fontStyle: bold ? 'bold' : 'normal', color: col }).setOrigin(ox === undefined ? 0.5 : ox, 0.5).setDepth(D + 3));
-    const holder = []; this.loadChar(lv, ok => { if (this.hm !== m) return; const l = []; this.charCard(l, 'ch' + lv, 330, 372, 560, D + 1, ok); m.card = l; l.forEach(o => { add(o); o.setAlpha(0); this.tweens.add({ targets: o, alpha: 1, duration: 300 }); }); });
-    text(960, 118, this.names[0], 34, '#e7f3ea', true);
-    text(960, 160, tierName(P.lv), 20, '#ffd166', false);
-    const g = add(this.add.graphics().setDepth(D + 2));
-    g.fillStyle(0x121c17, 1); g.fillRoundedRect(740, 200, 440, 150, 18); g.lineStyle(2, 0x2a3d31, 1); g.strokeRoundedRect(740, 200, 440, 150, 18);
-    text(780, 238, '🪙', 30, '#fff', false, 0); text(830, 238, fmtN(P.coins) + ' coins', 28, '#ffd166', true, 0);
-    text(780, 292, '🏆', 30, '#fff', false, 0); text(830, 292, fmtN(P.tr) + ' trophies', 28, '#e7f3ea', true, 0);
-    text(780, 334, 'Wins ' + P.w + '   Losses ' + P.l, 15, '#8fb39b', false, 0);
-    g.fillStyle(0x4ade80, 1); g.fillRoundedRect(760, 400, 400, 96, 48);
-    g.fillStyle(0xffffff, 0.18); g.fillRoundedRect(768, 406, 384, 38, 38);
-    text(960, 448, 'PLAY', 46, '#0b130f', true);
+    this.loadChar(lv, ok => {
+      if (this.hm !== m) return; const l = []; this.charCard(l, 'ch' + lv, 330, 372, 560, D + 1, ok); m.card = l;
+      const fr = this.add.graphics().setDepth(D + 3); l.push(fr);
+      fr.lineStyle(14, 0xffc21a, 0.10); fr.strokeRoundedRect(50, 92, 560, 560, 24); fr.lineStyle(8, 0xffc21a, 0.22); fr.strokeRoundedRect(50, 92, 560, 560, 24);
+      fr.lineStyle(3, 0xffd980, 1); fr.strokeRoundedRect(50, 92, 560, 560, 22);
+      l.forEach(o => { add(o); o.setAlpha(0); this.tweens.add({ targets: o, alpha: 1, duration: 300 }); });
+    });
+    this.makeBtn(m.objs, 128, 128, 116, 38, 0xe0a410, 'LV ' + P.lv, 20, '#2b1a00', D + 4);
+    const nm = this.title(m.objs, 960, 112, this.names[0], 38, D + 3);
+    this.makeBtn(m.objs, 960, 162, 320, 34, 0x4a3a10, tierName(P.lv), 17, '#ffd980', D + 3);
+    add(this.add.image(960, 275, this.panelKey('stats440', 440, 170, 20, '#1c2b23', '#0d1611', 'rgba(255,255,255,0.12)')).setDepth(D + 2));
+    const gi = add(this.add.graphics().setDepth(D + 3));
+    for (const [yy, col] of [[240, 0xffc21a], [300, 0xb36bff]]) { gi.fillStyle(0x0b130f, 1); gi.fillCircle(792, yy, 24); gi.lineStyle(2, col, 0.9); gi.strokeCircle(792, yy, 24); }
+    text(792, 240, '🪙', 26, '#fff'); text(792, 300, '🏆', 26, '#fff');
+    text(832, 228, 'COINS', 12, '#7f9a8a', false, 0); text(832, 252, fmtN(P.coins), 30, '#ffd166', true, 0);
+    text(832, 288, 'TROPHIES', 12, '#7f9a8a', false, 0); text(832, 312, fmtN(P.tr), 30, '#f4fbf6', true, 0);
+    text(1150, 252, 'W ' + P.w, 16, '#7be39a', true, 1); text(1150, 312, 'L ' + P.l, 16, '#ff8a7a', true, 1);
+    const playB = this.makeBtn(m.objs, 960, 448, 400, 96, 0x2fc468, 'PLAY', 48, '#06210f', D + 3);
+    this.tweens.add({ targets: playB, scaleX: 1.03, scaleY: 1.03, duration: 800, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
     const nx = CH_AVAIL.find(a => a > P.lv), cost = nx ? upCost(nx) : 0, needTr = nx ? upTrophies(nx) : 0;
     const noCoin = nx && P.coins < cost, noTr = nx && P.tr < needTr, can = nx && !noCoin && !noTr;
-    g.fillStyle(can ? 0xffc21a : 0x23332a, 1); g.fillRoundedRect(760, 514, 400, 64, 32);
-    if (can) { g.fillStyle(0xffffff, 0.22); g.fillRoundedRect(768, 518, 384, 24, 24); }
-    text(960, 546, !nx ? 'MAX LEVEL' : can ? 'UPGRADE   ' + fmtN(cost) + ' coins' : noTr ? 'Upgrade needs ' + fmtN(needTr) + ' trophies' : 'Upgrade: ' + fmtN(cost - P.coins) + ' more coins', can ? 26 : 18, can ? '#2b1a00' : '#8fb39b', true);
-    if (nx) text(960, 600, 'Next: ' + tierName(nx), 15, '#8fb39b');
-    text(960, 632, 'Win matches to earn coins and trophies', 14, '#5f7c6a');
-    m.btn = { x0: 760, x1: 1160, y0: 400, y1: 496 }; m.up = { x0: 760, x1: 1160, y0: 514, y1: 578, nx, cost, needTr, can, noTr, noCoin };
-    const pulse = this.tweens.add({ targets: g, alpha: 0.88, duration: 700, yoyo: true, repeat: -1 }); m.objs.push({ destroy() { pulse.stop(); }, setAlpha() {} });
+    const upB = this.makeBtn(m.objs, 960, 546, 400, 64, can ? 0xffb21a : 0x34443a, !nx ? 'MAX LEVEL' : can ? 'UPGRADE  ·  ' + fmtN(cost) + ' coins' : noTr ? 'Upgrade needs ' + fmtN(needTr) + ' trophies' : 'Upgrade: ' + fmtN(cost - P.coins) + ' more coins', can ? 26 : 18, can ? '#2b1a00' : '#a9c0b1', D + 3);
+    if (can) this.tweens.add({ targets: upB, scaleX: 1.02, scaleY: 1.02, duration: 650, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+    if (nx) {                                                                        // two little progress bars toward the next level
+      const bars = add(this.add.graphics().setDepth(D + 3));
+      for (const [bx, lab, have, need] of [[860, 'COINS', P.coins, cost], [1060, 'TROPHIES', P.tr, needTr]]) {
+        const f = Math.max(0, Math.min(1, have / need));
+        bars.fillStyle(0x0b130f, 1); bars.fillRoundedRect(bx - 90, 612, 180, 9, 4.5); bars.fillStyle(f >= 1 ? 0x4ade80 : 0xffc21a, 1); if (f > 0) bars.fillRoundedRect(bx - 90, 612, 180 * f, 9, 4.5);
+        text(bx - 90, 598, lab, 11, '#7f9a8a', false, 0); text(bx + 90, 598, fmtN(have) + ' / ' + fmtN(need), 11, f >= 1 ? '#7be39a' : '#9cb7a6', false, 1);
+      }
+      text(960, 644, 'Next: ' + tierName(nx), 15, '#9cb7a6');
+    }
+    text(960, 680, 'Win matches to earn coins and trophies', 13, '#5f7c6a');
+    m.btn = { x0: 760, x1: 1160, y0: 400, y1: 496, ct: playB }; m.up = { x0: 760, x1: 1160, y0: 514, y1: 578, nx, cost, needTr, can, noTr, noCoin, ct: upB };
+    m.objs.forEach(o => { if (o.setAlpha && o.type !== 'Arc') o.setAlpha(0); }); this.tweens.add({ targets: m.objs.filter(o => o.setAlpha && o.type !== 'Arc' && !(m.card && m.card.includes(o))), alpha: 1, duration: 300 });
   }
   homeTap(p) {
     const m = this.hm; if (!m || this.upBusy) return; const b = m.btn, u = m.up, inb = r => p.x >= r.x0 && p.x <= r.x1 && p.y >= r.y0 && p.y <= r.y1;
-    if (inb(b)) { this.sfx('ball', 420); this.clearHome(); this.showRooms(); return; }
+    if (inb(b)) { this.press(b.ct); this.sfx('ball', 420); this.time.delayedCall(90, () => { if (this.hm === m) { this.clearHome(); this.showRooms(); } }); return; }
     if (inb(u)) {
+      this.press(u.ct);
       if (!u.nx) { this.toast('You are at the top level'); return; }
       if (u.noTr) { this.toast('Reach ' + fmtN(u.needTr) + ' trophies first (you have ' + fmtN(this.prof.tr) + ')'); return; }
       if (u.noCoin) { this.toast('Not enough coins: ' + fmtN(u.cost - this.prof.coins) + ' more'); return; }
@@ -1331,16 +1412,28 @@ class Main extends Phaser.Scene {
     let ready = 0, ok1 = false, ok2 = false, finished = false;
     const finish = () => { if (finished) return; finished = true; this.tweens.add({ targets: m.objs, alpha: 0, duration: 250, onComplete: () => { m.objs.forEach(o => o.destroy()); done(); } }); };
     const build = () => {
-      add(this.add.rectangle(640, 360, 1280, 720, 0x05080a, 0.97).setDepth(D));
-      const lc = [], rc = []; this.charCard(lc, 'ch' + myLv, 330, 330, 470, D + 1, ok1); this.charCard(rc, 'ch' + oppLv, 950, 330, 470, D + 1, ok2, true);
+      add(this.add.image(640, 360, this.bgKey('vs', (c, w, h) => {
+        c.fillStyle = '#04070a'; c.fillRect(0, 0, w, h);
+        c.save(); c.beginPath(); c.moveTo(0, 0); c.lineTo(690, 0); c.lineTo(590, 720); c.lineTo(0, 720); c.closePath(); c.clip();
+        let g = c.createRadialGradient(330, 330, 20, 330, 360, 640); g.addColorStop(0, '#1d4f9c'); g.addColorStop(1, '#06101f'); c.fillStyle = g; c.fillRect(0, 0, w, h); c.restore();
+        c.save(); c.beginPath(); c.moveTo(690, 0); c.lineTo(1280, 0); c.lineTo(1280, 720); c.lineTo(590, 720); c.closePath(); c.clip();
+        g = c.createRadialGradient(950, 330, 20, 950, 360, 640); g.addColorStop(0, '#a8480f'); g.addColorStop(1, '#1f0d05'); c.fillStyle = g; c.fillRect(0, 0, w, h); c.restore();
+        c.strokeStyle = 'rgba(255,230,160,0.9)'; c.lineWidth = 5; c.shadowColor = '#ffc21a'; c.shadowBlur = 24; c.beginPath(); c.moveTo(690, 0); c.lineTo(590, 720); c.stroke();
+      })).setDepth(D));
+      const lc = [], rc = [], fr = this.add.graphics().setDepth(D + 3); lc.push(fr);
+      this.charCard(lc, 'ch' + myLv, 330, 330, 470, D + 1, ok1); this.charCard(rc, 'ch' + oppLv, 950, 330, 470, D + 1, ok2, true);
+      fr.lineStyle(14, 0x4d9bff, 0.14); fr.strokeRoundedRect(95, 95, 470, 470, 24); fr.lineStyle(3, 0x8cc2ff, 1); fr.strokeRoundedRect(95, 95, 470, 470, 22);
+      fr.lineStyle(14, 0xff8a3d, 0.14); fr.strokeRoundedRect(715, 95, 470, 470, 24); fr.lineStyle(3, 0xffc08a, 1); fr.strokeRoundedRect(715, 95, 470, 470, 22);
       lc.forEach(add); rc.forEach(add);
-      const tx = (x, y, t, size, col, bold) => add(this.add.text(x, y, t, { fontFamily: 'Arial', fontSize: size + 'px', fontStyle: bold ? 'bold' : 'normal', color: col }).setOrigin(0.5).setDepth(D + 3));
-      tx(330, 590, this.names[0], 28, '#fff', true); tx(330, 624, tierName(myLv), 16, '#ffd166'); tx(330, 654, '🏆 ' + fmtN(P.tr), 20, '#e7f3ea', true);
-      tx(950, 590, bot.name, 28, '#fff', true); tx(950, 624, tierName(oppLv), 16, '#ffd166'); tx(950, 654, '🏆 ' + fmtN(oppTr), 20, '#e7f3ea', true);
-      const vs = add(this.add.image(640, 300, 'vslogo').setDepth(D + 4).setScale(0)); this.tweens.add({ targets: vs, scale: 1.1, duration: 450, ease: 'Back.easeOut' });
-      tx(640, 410, fmtN(ROOMS[this.room].fee) + ' coins', 20, '#ffd166', true); tx(640, 438, 'Win ' + fmtN(ROOMS[this.room].prize), 15, '#8fb39b');
-      const sl = add(this.add.image(330 - 640, 330, 'ucard').setVisible(false));    // (placeholder so the cards can slide in)
-      m.objs.forEach(o => { if (o !== sl) o.setAlpha(0); }); this.tweens.add({ targets: m.objs.filter(o => o !== sl), alpha: 1, duration: 300 });
+      const tx = (x, y, t, size, col, bold) => { const o = add(this.add.text(x, y, t, { fontFamily: 'Arial', fontSize: size + 'px', fontStyle: bold ? 'bold' : 'normal', color: col }).setOrigin(0.5).setDepth(D + 5)); o.setShadow(0, 2, 'rgba(0,0,0,0.6)', 4, false, true); return o; };
+      this.makeBtn(m.objs, 330, 598, 330, 46, 0x2a62c4, this.names[0], 26, '#ffffff', D + 4); this.makeBtn(m.objs, 950, 598, 330, 46, 0xc4580f, bot.name, 26, '#ffffff', D + 4);
+      tx(330, 640, tierName(myLv), 16, '#ffd980'); tx(950, 640, tierName(oppLv), 16, '#ffd980');
+      tx(330, 668, '🏆 ' + fmtN(P.tr), 20, '#f4fbf6', true); tx(950, 668, '🏆 ' + fmtN(oppTr), 20, '#f4fbf6', true);
+      const glow = add(this.add.circle(640, 300, 130, 0xffb21a, 0.20).setDepth(D + 3)); this.tweens.add({ targets: glow, scale: 1.25, alpha: 0.08, duration: 900, yoyo: true, repeat: -1 });
+      const vs = add(this.add.image(640, 300, 'vslogo').setDepth(D + 6).setScale(0)); this.tweens.add({ targets: vs, scale: 1.2, duration: 450, ease: 'Back.easeOut' });
+      add(this.add.image(640, 440, this.panelKey('fee210', 210, 62, 18, '#2a2412', '#120e06', 'rgba(255,209,102,0.7)', 'rgba(255,194,26,0.5)')).setDepth(D + 4));
+      tx(640, 430, fmtN(ROOMS[this.room].fee) + ' coins entry', 19, '#ffd166', true); tx(640, 454, 'Winner takes ' + fmtN(ROOMS[this.room].prize), 14, '#cfe8d6');
+      m.objs.forEach(o => { if (o.setAlpha && o !== vs) o.setAlpha(0); }); this.tweens.add({ targets: m.objs.filter(o => o !== vs && o.setAlpha), alpha: 1, duration: 320 });
       this.time.delayedCall(2600, finish);
     };
     const check = () => { if (++ready === 2) build(); };
