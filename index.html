@@ -797,6 +797,10 @@ function getTelegramUser() {
   try { const o = JSON.parse(sessionStorage.getItem('__telegram__initParams') || 'null'); if (o && o.tgWebAppData) { const u = fromData(o.tgWebAppData); if (u) return u; } } catch (e) {}
   return null;
 }
+/* Owner-only test tools (reset progress, add coins + trophies) in the settings menu: only for these Telegram user ids.
+   NOTE: this is checked in the browser, so it only hides the buttons; it is not real security (real checks need the server). */
+const ADMIN_IDS = [192710528];
+function isAdmin() { try { const u = getTelegramUser(); return !!u && ADMIN_IDS.indexOf(Number(u.id)) >= 0; } catch (e) { return false; } }
 function initTelegram() {
   const tg = window.Telegram && window.Telegram.WebApp;
   if (!tg) return;
@@ -844,20 +848,8 @@ const ENTRY_LABEL = '';
 /* Player profile (coins + trophies).  Saved in the phone (localStorage) and in Telegram CloudStorage when available.
    Bots have a trophy rating too, so beating a strong bot gives more trophies; K is small because the opponent is a computer. */
 const START = { coins: 1000, tr: 800 }, BOT_RATING = [700, 1000, 1350, 1750, 2200], ELO_K = 20, PROF_KEY = 'pool_profile';
-const CH_AVAIL = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];          // 10 levels = img/f01.webp ... img/f10.webp
+const CH_AVAIL = [1, 2, 3, 4, 5, 6, 7, 20, 50];          // levels that have a character picture in img/fNN.webp (add a number here when you add a picture)
 const TIERS = ['Broken & Poor', 'Basic', 'Community Club', 'League', 'Professional', 'Luxury', 'Wealthy', 'Elite', 'Royal', 'Legendary'];
-const LV_INFO = [
-  { table: 'Broken Wreck',   outfit: 'Rags',          cue: 'Bent Wood',      fame: 'Unknown',      worth: 120 },
-  { table: 'Patched Wood',   outfit: 'Worn Hoodie',   cue: 'Plain Cue',      fame: 'Unknown',      worth: 900 },
-  { table: 'Pub Table',      outfit: 'Street Casual', cue: 'Club Cue',       fame: 'Local Name',   worth: 3500 },
-  { table: 'Club Table',     outfit: 'Neat Outfit',   cue: 'Pro Cue',        fame: 'Local Name',   worth: 9000 },
-  { table: 'League Felt',    outfit: 'Smart Casual',  cue: 'Gold-Ring Pro',  fame: 'Known Player', worth: 25000 },
-  { table: 'Mahogany Pro',   outfit: 'Designer',      cue: 'Carbon Pro',     fame: 'Known Player', worth: 70000 },
-  { table: 'Luxury Lounge',  outfit: 'Evening Dress', cue: 'Engraved Cue',   fame: 'City Star',    worth: 200000 },
-  { table: 'Gold Inlay',     outfit: 'Silk & Gold',   cue: 'Gold Inlay Cue', fame: 'Famous',       worth: 700000 },
-  { table: 'Royal Marble',   outfit: 'Royal Gown',    cue: 'Jeweled Cue',    fame: 'Famous',       worth: 2000000 },
-  { table: 'Royal Crystal',  outfit: 'Crown Jewels',  cue: 'Radiant Scepter',fame: 'World Famous', worth: 5000000 },
-];   // texts shown on the home screen for each level (edit freely to match your pictures)
 const chLevel = lv => { let b = CH_AVAIL[0]; for (const a of CH_AVAIL) if (a <= lv) b = a; return b; };      // best picture for a level
 const chNear = lv => CH_AVAIL.reduce((b, a) => Math.abs(a - lv) < Math.abs(b - lv) ? a : b, CH_AVAIL[0]);
 
@@ -866,30 +858,14 @@ function shadeCol(n, k) {                          // n = 0xRRGGBB, k = -1..1 (t
   const t = k > 0 ? 255 : 0, a = Math.abs(k), f = v => Math.round(v + (t - v) * a);
   return 'rgb(' + f(n >> 16 & 255) + ',' + f(n >> 8 & 255) + ',' + f(n & 255) + ')';
 }
-const UP_COST = [0, 0, 300, 700, 1500, 3000, 6000, 12000, 25000, 50000, 100000];      // coins to upgrade TO level n (index = n)
-const UP_TR = [0, 0, 850, 920, 1000, 1100, 1250, 1450, 1700, 2000, 2300];              // trophies needed for level n
-const upCost = lv => UP_COST[lv] || 0;
-const upTrophies = lv => UP_TR[lv] || 0;
-const tierName = lv => TIERS[Math.max(0, Math.min(9, lv - 1))] + ' · Lv ' + lv;
+const upCost = lv => Math.round(100 * Math.pow(lv, 1.75) / 50) * 50;         // coins to upgrade TO this level
+const upTrophies = lv => 800 + Math.round((lv - 1) * 30);                    // trophies needed for it
+const tierName = lv => TIERS[Math.min(9, Math.floor((lv - 1) / 5))] + ' · Lv ' + lv;
 const profDefault = () => ({ v: 1, lv: 1, coins: START.coins, tr: START.tr, w: 0, l: 0, games: 0, pending: null, ts: 0 });
 const fmtN = n => Math.round(n).toLocaleString('en-US');
 function cloudStore() {
   try { const tg = window.Telegram && window.Telegram.WebApp; if (tg && tg.CloudStorage && tg.isVersionAtLeast('6.9')) return tg.CloudStorage; } catch (e) {}
   return null;
-}
-/* Telegram Serverless (the server that keeps the real coins / trophies / level).  When it is not there (opened in a normal browser, or the
-   server is down) the game keeps working with the copy saved on the phone. */
-function srvApi() {
-  try { const w = window.Telegram && window.Telegram.WebApp; if (w && w.Serverless && typeof w.Serverless.call === 'function') return w.Serverless; } catch (e) {}
-  return null;
-}
-function srv(name, input) {
-  return new Promise((ok, no) => {
-    const s = srvApi(); if (!s) { no({ type: 'NO_SERVERLESS' }); return; }
-    let done = false; const t = setTimeout(() => { if (!done) { done = true; no({ type: 'TIMEOUT' }); } }, 9000);
-    try { s.call(name, input || {}, (err, r) => { if (done) return; done = true; clearTimeout(t); err ? no(err) : ok(r); }); }
-    catch (e) { done = true; clearTimeout(t); no({ type: 'EXCEPTION', message: String(e) }); }
-  });
 }
 function loadProfLocal() {
   try { const p = JSON.parse(localStorage.getItem(PROF_KEY) || 'null'); if (p && typeof p.coins === 'number' && typeof p.tr === 'number') return Object.assign(profDefault(), p); } catch (e) {}
@@ -904,7 +880,7 @@ class Main extends Phaser.Scene {
     this.loadSamples();
     this.buildPeopleArt();
     this.vsBot = true; this.bot = null; this.botJob = null; this.mm = null; this.rm = null;
-    this.prof = loadProfLocal(); this.inGame = false; this._toast = null; this.net = { on: false, busy: false, gameId: null };
+    this.prof = loadProfLocal(); this.inGame = false; this._toast = null;
     try { this.room = Math.max(0, Math.min(ROOMS.length - 1, +localStorage.getItem('pool_room') || 0)); } catch (e) { this.room = 0; }
     this.eq = []; this.rollCtx = []; this.rollOut = []; this.ori = [];
     for (let n = 0; n <= 15; n++) {                // one rolling-sphere texture per ball number
@@ -951,7 +927,7 @@ class Main extends Phaser.Scene {
     this.drawUserCard(null);
     this._userSet = !!tgUser;
     window.__tgReady = () => {                       // the Telegram script arrived after the game started: pick up the user then
-      initTelegram(); this.initServer(); this.syncCloud();
+      initTelegram(); this.syncCloud();
       const u = getTelegramUser(); if (!u || this._userSet) return; this._userSet = true;
       this.names[0] = clip(u.first_name || u.username || 'Player 1');
       this.nameT[0].setText(this.names[0]); this.letterT[0].setText(this.names[0].charAt(0).toUpperCase()); this.drawUserCard(null);
@@ -997,7 +973,6 @@ class Main extends Phaser.Scene {
 
     initTelegram();
     this.resolvePending();
-    this.initServer();
     this.syncCloud();
     this.startGame();
   }
@@ -1015,7 +990,6 @@ class Main extends Phaser.Scene {
       cs.getItem(PROF_KEY, (err, val) => {
         let c = null; try { c = val ? JSON.parse(val) : null; } catch (e) {}
         if (!c || typeof c.coins !== 'number' || typeof c.tr !== 'number') { this.saveProf(); return; }
-        if (this.net.on) return;
         if ((c.ts || 0) > (this.prof.ts || 0) && !this.inGame) {
           this.prof = Object.assign(profDefault(), c);
           try { localStorage.setItem(PROF_KEY, JSON.stringify(this.prof)); } catch (e) {}
@@ -1025,19 +999,6 @@ class Main extends Phaser.Scene {
       });
     } catch (e) {}
   }
-  /* ---------- the server copy of the profile ---------- */
-  applyServerProfile(p, redraw) {                  // the server is always right: its numbers replace ours
-    if (!p) return; const P = this.prof;
-    P.coins = p.coins; P.tr = p.trophies; P.lv = p.level; P.w = p.wins; P.l = p.losses; P.games = p.games;
-    this.saveProf(); this.refreshProfT();
-    if (redraw !== false && !this.upBusy && !this.inGame) { if (this.state === 'home') this.showHome(); else if (this.state === 'rooms') { this.clearRooms(); this.showRooms(); } }
-  }
-  initServer() {
-    if (this.net.on || this.net.busy || !srvApi()) return; this.net.busy = true;
-    srv('getProfile').then(r => { this.net.on = true; this.net.busy = false; this.applyServerProfile(r.profile); })
-      .catch(() => { this.net.busy = false; });
-  }
-  econText(prize, d, suspicious) { return (prize ? '+' + fmtN(prize) + ' coins   ' : 'Entry lost   ') + (suspicious ? '(win too fast: not counted)   ' : '') + (d >= 0 ? '+' : '') + d + ' 🏆   (gear > New game)'; }
   toast(t) {
     if (this._toast) { this.tweens.killTweensOf(this._toast); this._toast.destroy(); }
     const o = this._toast = this.add.text(640, 650, t, { fontFamily: 'Arial', fontSize: '20px', fontStyle: 'bold', color: '#fff', backgroundColor: '#000000cc', padding: { x: 16, y: 8 } }).setOrigin(0.5).setDepth(80);
@@ -1059,13 +1020,6 @@ class Main extends Phaser.Scene {
     const before = P.tr; P.tr = Math.max(0, P.tr + raw);
     if (won) { P.coins += R0.prize; P.w++; } else P.l++;
     P.games++; P.pending = null; this.inGame = false; this.saveProf(); this.refreshProfT();
-    if (this.net.on && this.net.gameId) {
-      const gid = this.net.gameId; this.net.gameId = null;
-      srv('finishGame', { gameId: gid, won }).then(r => {
-        this.applyServerProfile(r.profile, false);
-        if (this.msgBase) this.msg.setText(this.msgBase + '   ' + this.econText(r.result.prize, r.result.delta, r.result.suspicious));
-      }).catch(e => { if (e && e.parameters && e.parameters.profile) this.applyServerProfile(e.parameters.profile, false); });
-    }
     return { prize: won ? R0.prize : 0, d: P.tr - before };
   }
   topUp() {                                        // never leave the player stuck: below the cheapest entry the balance is topped up for free
@@ -1077,10 +1031,6 @@ class Main extends Phaser.Scene {
   startGame() {
     if (this.inGame) {                              // leaving a running game = a loss
       this.inGame = false; this.resolvePending();
-      if (this.net.on && this.net.gameId) {
-        const gid = this.net.gameId; this.net.gameId = null;
-        srv('finishGame', { gameId: gid, won: false, resigned: true }).then(r => this.applyServerProfile(r.profile)).catch(() => {});
-      }
     }
     this.clearMatch(); this.clearRooms(); this.botJob = null; this.topUp();
     this.rules.reset();
@@ -1094,18 +1044,6 @@ class Main extends Phaser.Scene {
     P.coins = Math.max(0, P.coins - R0.fee); P.pending = { room: this.room, lvl: this.bot ? this.bot.level : 0, t: Date.now() };
     this.inGame = true; this.saveProf(); this.refreshProfT();
     this.entryT.setText('Prize ' + fmtN(R0.prize));
-    this.net.gameId = null;
-    if (this.net.on) {
-      srv('startGame', { room: this.room, botLevel: this.bot.level }).then(r => { this.net.gameId = r.gameId; this.applyServerProfile(r.profile, false); })
-        .catch(e => {
-          const pr = e && e.parameters;
-          if (pr && pr.profile) {                                              // the server refused this game (not enough coins / trophies): go back
-            this.prof.pending = null; this.inGame = false; this.applyServerProfile(pr.profile, false);
-            this.toast(pr.code === 'NEED_TROPHIES' ? 'Not enough trophies for this table' : pr.code === 'NEED_COINS' ? 'Not enough coins for this table' : 'This game could not start');
-            this.startGame();
-          }                                                                    // (no connection: the game goes on and is counted only on this phone)
-        });
-    }
     this.state = 'aim'; this.turnLeft = TURN_TIME;
     this.refreshHud();
     this.msg.setText(this.rules.turn === 0 ? 'Break: drag the cue ball behind the line if you like, then aim' : this.names[1] + ' breaks');
@@ -1248,7 +1186,7 @@ class Main extends Phaser.Scene {
      so the VS screen can appear the instant the opponent is revealed */
   prepVs() {
     const P = this.prof, b = this.bot;
-    b.cl = chNear(Math.max(1, Math.min(10, P.lv + (b.level - 1) + Math.round(rand(-1, 1)))));
+    b.cl = chNear(Math.max(1, Math.min(50, P.lv + (b.level - 1) * 3 + Math.round(rand(-2, 2)))));
     b.tr = Math.round(BOT_RATING[b.level] + rand(-60, 60));
     this.loadChar(chLevel(P.lv), () => {}); this.loadChar(b.cl, () => {});
   }
@@ -1378,150 +1316,53 @@ class Main extends Phaser.Scene {
   }
 
   /* ---------- home screen: your character, coins, trophies, PLAY ---------- */
-  clearHome() { const m = this.hm; if (!m) return; this.tweens.killTweensOf(m.objs); if (m.timers) m.timers.forEach(t => t.remove()); (m.cnts || []).forEach(c => c.stop()); m.objs.forEach(o => o.destroy()); this.hm = null; }
-  cnt(obj, from, to, ms, f, m) {                                   // number that counts up/down inside a text object
-    const c = this.tweens.addCounter({ from, to, duration: ms, ease: 'Cubic.easeOut', onUpdate: t => { if (obj.scene) obj.setText(f(t.getValue())); } });
-    if (m) (m.cnts = m.cnts || []).push(c); return c;
-  }
-  vigKey(n) {                                                      // dark edges / tint on the picture, different for each wealth tier
-    const k = n <= 3 ? 0 : n <= 6 ? 1 : 2;
-    return this.tex('vig' + k, 560, 560, (c, w, h) => {
-      const g = c.createRadialGradient(w / 2, h * 0.5, w * [0.25, 0.36, 0.40][k], w / 2, h * 0.5, w * 0.72);
-      g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, ['rgba(0,0,0,0.62)', 'rgba(20,10,0,0.38)', 'rgba(74,26,122,0.30)'][k]);
-      c.fillStyle = g; c.fillRect(0, 0, w, h);
-    });
-  }
-  showHome(opt) {
-    opt = opt || {}; const prevLv = opt.prev ? opt.prev.lv : null, prevCoins = opt.prev ? opt.prev.coins : null;
+  clearHome() { const m = this.hm; if (!m) return; this.tweens.killTweensOf(m.objs); m.objs.forEach(o => o.destroy()); this.hm = null; }
+  showHome() {
     this.clearHome(); this.state = 'home'; this.botJob = null;
-    const D = 50, m = this.hm = { objs: [], timers: [], cnts: [] }, add = o => { m.objs.push(o); return o; }, P = this.prof, CX = 945;
+    const D = 50, m = this.hm = { objs: [] }, add = o => { m.objs.push(o); return o; }, P = this.prof;
     add(this.add.image(640, 360, this.bgKey('home', (c, w, h) => {
       const g = c.createRadialGradient(330, 360, 40, 330, 380, 760); g.addColorStop(0, '#1d5a3b'); g.addColorStop(0.5, '#0c2418'); g.addColorStop(1, '#040b07');
       c.fillStyle = g; c.fillRect(0, 0, w, h);
       const r = c.createLinearGradient(700, 0, 1280, 0); r.addColorStop(0, 'rgba(0,0,0,0)'); r.addColorStop(1, 'rgba(0,0,0,0.45)'); c.fillStyle = r; c.fillRect(0, 0, w, h);
       for (let i = 0; i < 7; i++) { c.fillStyle = 'rgba(255,230,160,0.03)'; c.beginPath(); c.moveTo(80 + i * 120, 0); c.lineTo(130 + i * 120, 0); c.lineTo(-100 + i * 120, 720); c.lineTo(-150 + i * 120, 720); c.fill(); }
     })).setDepth(D));
-    const text = (x, y, t, size, col, bold, ox) => add(this.add.text(x, y, t, { fontFamily: 'Arial', fontSize: size + 'px', fontStyle: bold ? 'bold' : 'normal', color: col }).setOrigin(ox === undefined ? 0.5 : ox, 0.5).setDepth(D + 3));
-    const lvIdx = chLevel(P.lv); let view = lvIdx, shown = prevLv ? chLevel(prevLv) : null;
-
-    /* ---- left: picture card ---- */
-    m.card = null;
-    const buildCard = (n, fade) => this.loadChar(n, ok => {
-      if (this.hm !== m || view !== n) return; const l = []; this.charCard(l, 'ch' + n, 330, 372, 560, D + 1, ok);
-      if (ok) { const vg = this.add.image(330, 372, this.vigKey(n)).setDepth(D + 2); const mk = this.make.graphics({ x: 0, y: 0, add: false }); mk.fillStyle(0xffffff, 1); mk.fillRoundedRect(50, 92, 560, 560, 22); vg.setMask(mk.createGeometryMask()); l.push(vg, mk); }
-      const old = m.card; m.card = l; l.forEach(o => { m.objs.push(o); if (fade) { o.setAlpha(0); this.tweens.add({ targets: o, alpha: 1, duration: fade }); } });
-      if (old) this.time.delayedCall(fade ? fade + 20 : 0, () => old.forEach(o => o.destroy()));
-      const im = l.find(o => o.type === 'Image'); if (im && opt.pop) { const sx = im.scaleX, sy = im.scaleY; im.setScale(sx * 1.09, sy * 1.09); this.tweens.add({ targets: im, scaleX: sx, scaleY: sy, duration: 1100, ease: 'Cubic.easeOut' }); }
+    this.dust(m.objs, 22, 0xffe9a8);
+    const lv = chLevel(P.lv), text = (x, y, t, size, col, bold, ox) => add(this.add.text(x, y, t, { fontFamily: 'Arial', fontSize: size + 'px', fontStyle: bold ? 'bold' : 'normal', color: col }).setOrigin(ox === undefined ? 0.5 : ox, 0.5).setDepth(D + 3));
+    this.loadChar(lv, ok => {
+      if (this.hm !== m) return; const l = []; this.charCard(l, 'ch' + lv, 330, 372, 560, D + 1, ok); m.card = l;
+      const fr = this.add.graphics().setDepth(D + 3); l.push(fr);
+      fr.lineStyle(14, 0xffc21a, 0.10); fr.strokeRoundedRect(50, 92, 560, 560, 24); fr.lineStyle(8, 0xffc21a, 0.22); fr.strokeRoundedRect(50, 92, 560, 560, 24);
+      fr.lineStyle(3, 0xffd980, 1); fr.strokeRoundedRect(50, 92, 560, 560, 22);
+      l.forEach(o => { add(o); o.setAlpha(0); this.tweens.add({ targets: o, alpha: 1, duration: 300 }); });
     });
-    const fr = add(this.add.graphics().setDepth(D + 3));
-    fr.lineStyle(14, 0xffc21a, 0.10); fr.strokeRoundedRect(50, 92, 560, 560, 24); fr.lineStyle(8, 0xffc21a, 0.22); fr.strokeRoundedRect(50, 92, 560, 560, 24); fr.lineStyle(3, 0xffd980, 1); fr.strokeRoundedRect(50, 92, 560, 560, 22);
-    this.makeBtn(m.objs, 128, 128, 116, 38, 0xe0a410, 'LV ' + P.lv, 20, '#2b1a00', D + 5);
-    buildCard(view, opt.prev ? 0 : 300);
-
-    /* ---- ambient particles over the picture: dust (poor) / warm light (mid) / rising gold + glints (rich) ---- */
-    m.timers.push(this.time.addEvent({ delay: 140, loop: true, callback: () => {
-      if (this.hm !== m || this.upBusy && !opt.prev) return; const t = m.ambTier || 0;
-      const x = rand(60, 600), y0 = t === 2 ? rand(420, 640) : rand(110, 630);
-      const col = t === 0 ? 0xe8dcc8 : t === 1 ? 0xffd9a0 : 0xffd35c, r = t === 2 ? rand(1.2, 3.2) : rand(0.8, 2.2);
-      const d = this.add.circle(x, y0, r, col, 0).setDepth(D + 3); m.objs.push(d);
-      this.tweens.add({ targets: d, alpha: t === 2 ? rand(0.5, 0.95) : rand(0.18, 0.45), duration: 600, yoyo: true, hold: 500 });
-      this.tweens.add({ targets: d, x: x + rand(-30, 30), y: y0 + (t === 2 ? -rand(120, 260) : t === 1 ? -rand(20, 70) : rand(10, 60)), duration: t === 2 ? rand(1800, 2800) : rand(2600, 4200), onComplete: () => d.destroy() });
-      if (t > 0 && Math.random() < (t === 2 ? 0.16 : 0.05)) {                           // glint
-        const gs = this.add.star(rand(70, 590), rand(120, 600), 4, 1.5, rand(6, t === 2 ? 15 : 10), 0xffffff, 0).setDepth(D + 4); m.objs.push(gs);
-        this.tweens.add({ targets: gs, alpha: 1, scale: { from: 0.2, to: 1 }, angle: 45, duration: 380, yoyo: true, onComplete: () => gs.destroy() });
-      }
-    } }));
-    m.ambTier = lvIdx <= 3 ? 0 : lvIdx <= 6 ? 1 : 2;
-
-    /* ---- right: title, stars, chips ---- */
-    const info = n => LV_INFO[Math.max(1, Math.min(10, n)) - 1];
-    const ttl = this.title(m.objs, CX, 100, '', 36, D + 3), sub = text(CX, 134, '', 14, '#9cb7a6'), stars = text(CX, 160, '', 22, '#ffd166');
-    const setHead = n => { ttl.setText(TIERS[n - 1]); sub.setText('Lv ' + n + '  ·  ' + info(n).table + '  ·  ' + info(n).outfit); stars.setText('★'.repeat(Math.ceil(n / 2)) + '☆'.repeat(5 - Math.ceil(n / 2))); stars.setColor('#ffd166'); };
-    setHead(view);
-    for (const [cx0, icon, lab, col, key] of [[CX - 150, '🪙', 'COINS', 0xffc21a, 'coins'], [CX + 150, '🏆', 'TROPHIES', 0xb36bff, 'tr']]) {
-      add(this.add.image(cx0, 206, this.panelKey('chip280', 286, 50, 25, '#22362b', '#0f1a14', 'rgba(255,255,255,0.14)')).setDepth(D + 2));
-      const gi = add(this.add.graphics().setDepth(D + 3)); gi.fillStyle(0x0b130f, 1); gi.fillCircle(cx0 - 112, 206, 18); gi.lineStyle(2, col, 0.95); gi.strokeCircle(cx0 - 112, 206, 18);
-      text(cx0 - 112, 207, icon, 20, '#fff'); text(cx0 - 84, 194, lab, 10, '#7f9a8a', false, 0);
-      const v = text(cx0 - 84, 215, fmtN(P[key]), 24, key === 'coins' ? '#ffd166' : '#f4fbf6', true, 0);
-      if (key === 'coins' && prevCoins !== null) this.cnt(v, prevCoins, P.coins, 1200, x => fmtN(Math.round(x)), m);
-    }
-    text(CX, 244, 'W ' + P.w + '   ·   L ' + P.l, 12, '#6f8a7a');
-
-    /* ---- stat bars ---- */
-    add(this.add.image(CX, 312, this.panelKey('stats590', 590, 112, 18, '#1c2b23', '#0d1611', 'rgba(255,255,255,0.10)')).setDepth(D + 2));
-    const LAB = ['TABLE', 'OUTFIT', 'CUE', 'FAME'], valText = [];
-    const vals = n => { const p = (n - 1) / 9; return [6 + 94 * p, 8 + 92 * Math.pow(p, 1.05), 5 + 95 * Math.pow(p, 0.95), 4 + 96 * Math.pow(p, 1.4)]; };
-    const names = n => [info(n).table, info(n).outfit, info(n).cue, info(n).fame];
-    LAB.forEach((l, i) => { text(682, 272 + i * 26, l, 12, '#7f9a8a', true, 0); valText.push(text(1228, 272 + i * 26, '', 12, '#ffe9a8', true, 1)); });
-    const bg = add(this.add.graphics().setDepth(D + 3)), BX = 770, BW = 330;
-    m.bv = (shown ? vals(shown) : [0, 0, 0, 0]).slice(); m.bghost = shown ? vals(shown) : [0, 0, 0, 0];
-    const drawBars = () => {
-      bg.clear();
-      for (let i = 0; i < 4; i++) {
-        const y = 272 + i * 26; bg.fillStyle(0x0b0f20, 1); bg.fillRoundedRect(BX, y - 5, BW, 10, 5);
-        if (m.bghost[i] > 0) { bg.fillStyle(0xffffff, 0.22); bg.fillRoundedRect(BX, y - 5, Math.max(8, BW * m.bghost[i] / 100), 10, 5); }
-        const w = Math.max(0, BW * m.bv[i] / 100); if (w > 0) { bg.fillStyle(0xff9d1c, 1); bg.fillRoundedRect(BX, y - 5, Math.max(8, w), 10, 5); bg.fillStyle(0xffcf4a, 1); bg.fillRoundedRect(BX, y - 5, Math.max(8, w), 5, 3); }
-      }
-    };
-    const setBars = (n, ms, from) => {
-      const tgt = vals(n), st = from ? from.slice() : m.bv.slice(); names(n).forEach((s, i) => valText[i].setText(s));
-      const c = this.tweens.addCounter({ from: 0, to: 1, duration: ms, ease: 'Cubic.easeOut', onUpdate: t => { const k = t.getValue(); for (let i = 0; i < 4; i++) m.bv[i] = st[i] + (tgt[i] - st[i]) * k; drawBars(); } });
-      m.cnts.push(c);
-    };
-    drawBars(); setBars(view, shown ? 1300 : 700);
-
-    /* ---- net worth ---- */
-    add(this.add.graphics().setDepth(D + 3)).lineStyle(1, 0xffffff, 0.08).lineBetween(660, 372, 1230, 372);
-    text(682, 392, 'NET WORTH', 12, '#7f9a8a', true, 0); const nw = text(1228, 392, '', 24, '#ffd166', true, 1); nw.setShadow(0, 0, '#ffcf4a', 10, false, true);
-    const setWorth = (n, from, ms) => this.cnt(nw, from, info(n).worth, ms, x => '$' + fmtN(Math.round(x)), m);
-    setWorth(view, shown ? info(shown).worth : 0, shown ? 1400 : 700);
-
-    /* ---- level strip: every unlocked picture, locked ones show a lock ---- */
-    m.thumbs = []; const TS = 46, TG = 7, tx0 = CX - (10 * TS + 9 * TG) / 2 + TS / 2, tmarks = add(this.add.graphics().setDepth(D + 5));
-    const markThumbs = () => {
-      tmarks.clear();
-      for (let n = 1; n <= 10; n++) {
-        const x = tx0 + (n - 1) * (TS + TG), y = 434, open = n <= lvIdx; tmarks.lineStyle(n === view ? 3 : 1.5, n === view ? 0xffd166 : 0xffffff, n === view ? 1 : open ? 0.25 : 0.12); tmarks.strokeRoundedRect(x - TS / 2, y - TS / 2, TS, TS, 8);
-      }
-    };
-    for (let n = 1; n <= 10; n++) {
-      const x = tx0 + (n - 1) * (TS + TG), y = 434, open = n <= lvIdx;
-      if (open) { const ph = add(this.add.rectangle(x, y, TS, TS, 0x1b2a22).setDepth(D + 3)); this.loadChar(n, ok => { if (this.hm !== m || !ok) return; const im = add(this.add.image(x, y, 'ch' + n).setDepth(D + 4)); im.setScale(TS / Math.min(im.width, im.height)); const mk = this.make.graphics({ x: 0, y: 0, add: false }); mk.fillStyle(0xffffff, 1); mk.fillRoundedRect(x - TS / 2, y - TS / 2, TS, TS, 8); im.setMask(mk.createGeometryMask()); m.objs.push(mk); }); }
-      else { add(this.add.rectangle(x, y, TS, TS, 0x0b130f).setDepth(D + 3)); text(x, y, '🔒', 17, '#fff').setDepth(D + 5).setAlpha(0.8); }
-      const nb = add(this.add.text(x - TS / 2 + 3, y - TS / 2 + 2, String(n), { fontFamily: 'Arial', fontSize: '10px', fontStyle: 'bold', color: '#fff', backgroundColor: '#000000bb', padding: { x: 3, y: 0 } }).setDepth(D + 6));
-      m.thumbs.push({ n, x0: x - TS / 2, x1: x + TS / 2, open });
-    }
-    markThumbs();
-    m.view = n => { if (n === view || n > lvIdx || this.upBusy) return; view = n; setHead(n); setBars(n, 600); setWorth(n, parseInt(nw.text.replace(/\D/g, '')) || 0, 600); m.ambTier = n <= 3 ? 0 : n <= 6 ? 1 : 2; markThumbs(); buildCard(n, 350); this.sfx('ball', 500); };
-    if (opt.prev) { stars.setScale(1.5); this.tweens.add({ targets: stars, scale: 1, duration: 700, ease: 'Back.easeOut' }); }
-
-    /* ---- next upgrade ---- */
+    this.makeBtn(m.objs, 128, 128, 116, 38, 0xe0a410, 'LV ' + P.lv, 20, '#2b1a00', D + 4);
+    const nm = this.title(m.objs, 960, 112, this.names[0], 38, D + 3);
+    this.makeBtn(m.objs, 960, 162, 320, 34, 0x4a3a10, tierName(P.lv), 17, '#ffd980', D + 3);
+    add(this.add.image(960, 275, this.panelKey('stats440', 440, 170, 20, '#1c2b23', '#0d1611', 'rgba(255,255,255,0.12)')).setDepth(D + 2));
+    const gi = add(this.add.graphics().setDepth(D + 3));
+    for (const [yy, col] of [[240, 0xffc21a], [300, 0xb36bff]]) { gi.fillStyle(0x0b130f, 1); gi.fillCircle(792, yy, 24); gi.lineStyle(2, col, 0.9); gi.strokeCircle(792, yy, 24); }
+    text(792, 240, '🪙', 26, '#fff'); text(792, 300, '🏆', 26, '#fff');
+    text(832, 228, 'COINS', 12, '#7f9a8a', false, 0); text(832, 252, fmtN(P.coins), 30, '#ffd166', true, 0);
+    text(832, 288, 'TROPHIES', 12, '#7f9a8a', false, 0); text(832, 312, fmtN(P.tr), 30, '#f4fbf6', true, 0);
+    text(1150, 252, 'W ' + P.w, 16, '#7be39a', true, 1); text(1150, 312, 'L ' + P.l, 16, '#ff8a7a', true, 1);
+    const playB = this.makeBtn(m.objs, 960, 448, 400, 96, 0x2fc468, 'PLAY', 48, '#06210f', D + 3);
+    this.tweens.add({ targets: playB, scaleX: 1.03, scaleY: 1.03, duration: 800, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
     const nx = CH_AVAIL.find(a => a > P.lv), cost = nx ? upCost(nx) : 0, needTr = nx ? upTrophies(nx) : 0;
     const noCoin = nx && P.coins < cost, noTr = nx && P.tr < needTr, can = nx && !noCoin && !noTr;
-    if (nx) {
-      text(660, 480, 'NEXT UPGRADE', 12, '#7f9a8a', true, 0); text(1240, 480, TIERS[nx - 1], 15, '#ffd980', true, 1);
+    const upB = this.makeBtn(m.objs, 960, 546, 400, 64, can ? 0xffb21a : 0x34443a, !nx ? 'MAX LEVEL' : can ? 'UPGRADE  ·  ' + fmtN(cost) + ' coins' : noTr ? 'Upgrade needs ' + fmtN(needTr) + ' trophies' : 'Upgrade: ' + fmtN(cost - P.coins) + ' more coins', can ? 26 : 18, can ? '#2b1a00' : '#a9c0b1', D + 3);
+    if (can) this.tweens.add({ targets: upB, scaleX: 1.02, scaleY: 1.02, duration: 650, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+    if (nx) {                                                                        // two little progress bars toward the next level
       const bars = add(this.add.graphics().setDepth(D + 3));
-      for (const [bx, lab, have, need] of [[660, 'COINS', P.coins, cost], [955, 'TROPHIES', P.tr, needTr]]) {
+      for (const [bx, lab, have, need] of [[860, 'COINS', P.coins, cost], [1060, 'TROPHIES', P.tr, needTr]]) {
         const f = Math.max(0, Math.min(1, have / need));
-        bars.fillStyle(0x0b130f, 1); bars.fillRoundedRect(bx, 498, 285, 9, 4.5); bars.fillStyle(f >= 1 ? 0x4ade80 : 0xffc21a, 1); if (f > 0) bars.fillRoundedRect(bx, 498, Math.max(9, 285 * f), 9, 4.5);
-        text(bx, 520, lab, 11, '#7f9a8a', false, 0); text(bx + 285, 520, fmtN(have) + ' / ' + fmtN(need), 11, f >= 1 ? '#7be39a' : '#9cb7a6', false, 1);
+        bars.fillStyle(0x0b130f, 1); bars.fillRoundedRect(bx - 90, 612, 180, 9, 4.5); bars.fillStyle(f >= 1 ? 0x4ade80 : 0xffc21a, 1); if (f > 0) bars.fillRoundedRect(bx - 90, 612, 180 * f, 9, 4.5);
+        text(bx - 90, 598, lab, 11, '#7f9a8a', false, 0); text(bx + 90, 598, fmtN(have) + ' / ' + fmtN(need), 11, f >= 1 ? '#7be39a' : '#9cb7a6', false, 1);
       }
+      text(960, 644, 'Next: ' + tierName(nx), 15, '#9cb7a6');
     }
-    const upB = this.makeBtn(m.objs, CX, 562, 590, 54, can ? 0xffb21a : 0x34443a, !nx ? 'MAX LEVEL' : can ? 'UPGRADE  ·  ' + fmtN(cost) + ' coins' : noTr ? 'Needs ' + fmtN(needTr) + ' trophies' : 'Need ' + fmtN(cost - P.coins) + ' more coins', can ? 26 : 19, can ? '#2b1a00' : '#a9c0b1', D + 4);
-    if (can) {
-      this.tweens.add({ targets: upB, scaleX: 1.015, scaleY: 1.03, duration: 650, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
-      const sh = this.add.image(-330, -2, this.tex('sheen', 90, 80, (c, w, h) => { const g = c.createLinearGradient(0, 0, w, 0); g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(0.5, 'rgba(255,255,255,0.55)'); g.addColorStop(1, 'rgba(255,255,255,0)'); c.fillStyle = g; c.fillRect(0, 0, w, h); })).setAngle(18).setBlendMode(Phaser.BlendModes.ADD); upB.add(sh);   // light sweeping over the button
-      const mk = this.make.graphics({ x: 0, y: 0, add: false }); mk.fillStyle(0xffffff, 1); mk.fillRoundedRect(CX - 290, 535, 580, 48, 14); sh.setMask(mk.createGeometryMask()); m.objs.push(mk);
-      this.tweens.add({ targets: sh, x: 330, duration: 900, repeatDelay: 1700, repeat: -1, ease: 'Sine.easeInOut' });
-    }
-    const playB = this.makeBtn(m.objs, CX, 636, 590, 76, 0x2fc468, 'PLAY', 44, '#06210f', D + 3);
-    this.tweens.add({ targets: playB, scaleX: 1.02, scaleY: 1.03, duration: 800, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
-    text(CX, 696, nx ? 'Win matches to earn coins and trophies' : 'You reached the legendary table', 13, '#5f7c6a');
-    m.btn = { x0: 650, x1: 1240, y0: 598, y1: 674, ct: playB }; m.up = { x0: 650, x1: 1240, y0: 535, y1: 589, nx, cost, needTr, can, noTr, noCoin, ct: upB };
-    if (!opt.prev) {
-      const fade = m.objs.filter(o => o.setAlpha && o.type !== 'Arc' && !(m.card && m.card.includes(o)));
-      fade.forEach(o => o.setAlpha(0)); this.tweens.add({ targets: fade, alpha: 1, duration: 300 });
-    }
+    text(960, 680, 'Win matches to earn coins and trophies', 13, '#5f7c6a');
+    m.btn = { x0: 760, x1: 1160, y0: 400, y1: 496, ct: playB }; m.up = { x0: 760, x1: 1160, y0: 514, y1: 578, nx, cost, needTr, can, noTr, noCoin, ct: upB };
+    m.objs.forEach(o => { if (o.setAlpha && o.type !== 'Arc') o.setAlpha(0); }); this.tweens.add({ targets: m.objs.filter(o => o.setAlpha && o.type !== 'Arc' && !(m.card && m.card.includes(o))), alpha: 1, duration: 300 });
   }
   homeTap(p) {
     const m = this.hm; if (!m || this.upBusy) return; const b = m.btn, u = m.up, inb = r => p.x >= r.x0 && p.x <= r.x1 && p.y >= r.y0 && p.y <= r.y1;
@@ -1531,63 +1372,45 @@ class Main extends Phaser.Scene {
       if (!u.nx) { this.toast('You are at the top level'); return; }
       if (u.noTr) { this.toast('Reach ' + fmtN(u.needTr) + ' trophies first (you have ' + fmtN(this.prof.tr) + ')'); return; }
       if (u.noCoin) { this.toast('Not enough coins: ' + fmtN(u.cost - this.prof.coins) + ' more'); return; }
-      this.doUpgrade(u.nx, u.cost); return;
+      this.doUpgrade(u.nx, u.cost);
     }
-    if (p.y >= 409 && p.y <= 459) { const t = (m.thumbs || []).find(t => p.x >= t.x0 && p.x <= t.x1); if (t) { if (!t.open) this.toast('Locked: upgrade to unlock'); else m.view(t.n); } }
   }
-  /* upgrade sequence: charge (sparks fly in, picture glows) -> flash + rings + rays + shake + burst -> new picture pops in, bars/numbers count up -> banner + confetti */
+  /* upgrade sequence: charge (sparks fly in) -> flash + rings + shake -> new picture -> banner -> home refreshes */
   doUpgrade(nx, cost) {
-    const P = this.prof, D = 50, cx = 330, cy = 372, S = 560, fx = [], A = o => { fx.push(o); return o; }, prev = { lv: P.lv, coins: P.coins };
+    const P = this.prof, m = this.hm, D = 50, cx = 330, cy = 372, S = 560, fx = [], A = o => { fx.push(o); return o; };
     this.upBusy = true; P.coins -= cost; P.lv = nx; this.saveProf(); this.refreshProfT();
-    if (this.net.on) srv('upgrade').then(r => this.applyServerProfile(r.profile, false)).catch(e => {
-      if (e && e.parameters && e.parameters.profile) { this.applyServerProfile(e.parameters.profile, false); this.toast('Upgrade was refused by the server'); }
-    });
-    const m = this.hm, haptic = k => { try { const h = window.Telegram.WebApp.HapticFeedback; if (k === 'ok') h.notificationOccurred('success'); else h.impactOccurred('heavy'); } catch (e) {} try { navigator.vibrate && navigator.vibrate(k === 'ok' ? [30, 40, 60] : 20); } catch (e) {} };
     this.loadChar(nx, ok => {
       if (this.hm !== m) { this.upBusy = false; return; }
-      const old = m.card && m.card.find(o => o.type === 'Image' && o.texture.key !== 'vig0' && !/^vig/.test(o.texture.key));
-      if (old) this.tweens.add({ targets: old, scaleX: old.scaleX * 0.96, scaleY: old.scaleY * 0.96, duration: 850, ease: 'Sine.easeIn' });
       const flash = A(this.add.rectangle(cx, cy, S, S, 0xfff3b8, 0).setDepth(D + 8));
-      const glow = A(this.add.image(cx, cy + 40, this.tex('glow', 256, 256, (c, w, h) => { const g = c.createRadialGradient(128, 128, 0, 128, 128, 128); g.addColorStop(0, 'rgba(255,240,170,1)'); g.addColorStop(0.35, 'rgba(255,214,90,0.55)'); g.addColorStop(1, 'rgba(255,190,40,0)'); c.fillStyle = g; c.fillRect(0, 0, w, h); })).setDepth(D + 7).setScale(0.3).setBlendMode(Phaser.BlendModes.ADD));
-      this.tweens.add({ targets: glow, scale: 3.4, alpha: 1, duration: 850, ease: 'Sine.easeIn' });
-      this.tweens.add({ targets: flash, alpha: 0.3, duration: 850, ease: 'Sine.easeIn' });
-      for (let i = 0; i < 40; i++) {                                                   // charge: sparks fly in
-        const a = rand(0, 6.283), r = rand(200, 360), st = A(this.add.star(cx + Math.cos(a) * r, cy + 40 + Math.sin(a) * r, 4, 2, rand(5, 10), i % 4 ? 0xffe08a : 0xffffff).setDepth(D + 9));
-        this.tweens.add({ targets: st, x: cx, y: cy + 40, alpha: 0, angle: 90, duration: rand(450, 850), delay: rand(0, 300), ease: 'Sine.easeIn' });
+      const glow = A(this.add.circle(cx, cy + 40, 30, 0xffe58a, 0.7).setDepth(D + 7).setScale(0.3));
+      this.tweens.add({ targets: glow, scale: 7, alpha: 0.9, duration: 800, ease: 'Sine.easeIn' });
+      this.tweens.add({ targets: flash, alpha: 0.5, duration: 800, ease: 'Sine.easeIn' });
+      for (let i = 0; i < 26; i++) {                                                    // charge: sparks fly in
+        const a = rand(0, 6.283), r = rand(180, 330), st = A(this.add.star(cx + Math.cos(a) * r, cy + 40 + Math.sin(a) * r, 4, 2, rand(5, 9), 0xffe08a).setDepth(D + 9));
+        this.tweens.add({ targets: st, x: cx, y: cy + 40, alpha: 0, duration: rand(450, 800), delay: rand(0, 250), ease: 'Sine.easeIn' });
       }
-      this.sfx('ball', 300); this.time.delayedCall(450, () => this.sfx('ball', 380));
-      this.time.delayedCall(900, () => {
-        this.cameras.main.shake(500, 0.007); this.sfx('ball', 700); haptic('hit');
-        flash.setAlpha(1); this.tweens.add({ targets: flash, alpha: 0, duration: 1000, ease: 'Sine.easeOut' });
+      this.sfx('ball', 300);
+      this.time.delayedCall(850, () => {
+        this.cameras.main.shake(450, 0.006); this.sfx('ball', 700);
+        flash.setAlpha(1); this.tweens.add({ targets: flash, alpha: 0, duration: 900, ease: 'Sine.easeOut' });
         glow.destroy();
-        const rays = A(this.add.graphics({ x: cx, y: cy + 40 }).setDepth(D + 7).setBlendMode(Phaser.BlendModes.ADD));       // spinning light rays
-        rays.fillStyle(0xffe58a, 0.35); for (let i = 0; i < 16; i++) { const a = i * Math.PI / 8; rays.fillTriangle(0, 0, Math.cos(a) * 520, Math.sin(a) * 520, Math.cos(a + 0.12) * 520, Math.sin(a + 0.12) * 520); }
-        rays.setScale(0.5).setAlpha(0); this.tweens.add({ targets: rays, alpha: { from: 1, to: 0 }, scale: 1.4, angle: 40, duration: 2000, ease: 'Sine.easeOut' });
-        for (let k = 0; k < 3; k++) {                                                    // shockwave rings
-          const rg = A(this.add.circle(cx, cy + 40, 60).setStrokeStyle(5 - k, 0xffe08a, 1).setFillStyle(0, 0).setDepth(D + 8));
-          this.tweens.add({ targets: rg, scale: 7 + k, alpha: 0, duration: 1100, delay: k * 140, ease: 'Cubic.easeOut' });
+        for (let k = 0; k < 2; k++) {                                                    // shockwave rings
+          const rg = A(this.add.circle(cx, cy + 40, 60).setStrokeStyle(5, 0xffe08a, 1).setFillStyle(0, 0).setDepth(D + 8));
+          this.tweens.add({ targets: rg, scale: 7, alpha: 0, duration: 1100, delay: k * 150, ease: 'Cubic.easeOut' });
         }
-        for (let i = 0; i < 110; i++) {                                                  // burst: stars and falling gold chips
-          const a = rand(0, 6.283), v = rand(120, 420), col = [0xfff2a8, 0xffd24a, 0xffb52e, 0xffffff][i % 4];
-          const st = A(i % 3 ? this.add.star(cx, cy + 40, 4, 2, rand(4, 10), col) : this.add.rectangle(cx, cy + 40, rand(5, 9), rand(3, 5), col)).setDepth(D + 9);
-          this.tweens.add({ targets: st, x: cx + Math.cos(a) * v, duration: rand(900, 1500), ease: 'Cubic.easeOut' });
-          this.tweens.add({ targets: st, y: cy + 40 + Math.sin(a) * v * 0.6 + 120, alpha: 0, angle: rand(-360, 360), duration: rand(900, 1500), ease: 'Quad.easeIn' });
+        for (let i = 0; i < 80; i++) {                                                   // burst
+          const a = rand(0, 6.283), v = rand(120, 380), st = A(this.add.star(cx, cy + 40, 4, 2, rand(4, 10), i % 3 ? 0xffd24a : 0xffffff).setDepth(D + 9));
+          this.tweens.add({ targets: st, x: cx + Math.cos(a) * v, y: cy + 40 + Math.sin(a) * v + 60, alpha: 0, angle: rand(-180, 180), duration: rand(700, 1400), ease: 'Cubic.easeOut' });
         }
-        this.time.delayedCall(180, () => {                                               // swap: rebuild the home with the new level; picture pops in, bars + numbers count up
-          if (this.hm !== m) { this.upBusy = false; return; }
-          this.showHome({ prev, pop: true });
-          haptic('ok');
-          const bw = 430, bn = A(this.add.image(cx, 112, this.panelKey('banner430', bw, 76, 38, '#3a2a06', '#140d00', 'rgba(255,209,102,1)', 'rgba(255,194,26,0.7)')).setDepth(D + 10).setAlpha(0).setScale(0.8));
-          const b1 = A(this.add.text(cx, 98, 'LEVEL UP!', { fontFamily: 'Arial', fontSize: '30px', fontStyle: 'bold', color: '#ffd166' }).setOrigin(0.5).setDepth(D + 11).setAlpha(0));
-          const b2 = A(this.add.text(cx, 130, tierName(nx), { fontFamily: 'Arial', fontSize: '17px', fontStyle: 'bold', color: '#ffffff' }).setOrigin(0.5).setDepth(D + 11).setAlpha(0));
-          this.tweens.add({ targets: bn, alpha: 1, scale: 1, y: 112, duration: 500, ease: 'Back.easeOut' }); this.tweens.add({ targets: [b1, b2], alpha: 1, duration: 400, delay: 150 });
-          for (let i = 0; i < 70; i++) {                                                 // confetti rain
-            const c = A(this.add.rectangle(rand(50, 610), 80, rand(5, 9), rand(3, 6), [0xffd24a, 0xffffff, 0xc49bff, 0xffb52e][i % 4]).setDepth(D + 9));
-            this.tweens.add({ targets: c, y: rand(450, 700), x: c.x + rand(-60, 60), angle: rand(-540, 540), alpha: { from: 1, to: 0.1 }, duration: rand(1500, 2600), delay: rand(0, 500), ease: 'Sine.easeIn' });
-          }
-          this.tweens.add({ targets: [bn, b1, b2], alpha: 0, duration: 500, delay: 2300 });
+        this.time.delayedCall(180, () => {                                                // swap the picture under the flash
+          if (m.card) m.card.forEach(o => o.destroy());
+          const l = []; this.charCard(l, 'ch' + nx, cx, cy, S, D + 1, ok); m.card = l; m.objs.push(...l);
+          const im = l.find(o => o.type === 'Image'); if (im) { im.setScale(im.scaleX * 1.08); this.tweens.add({ targets: im, scaleX: S / im.width, scaleY: S / im.height, duration: 900, ease: 'Cubic.easeOut' }); }
+          const bn = A(this.add.text(cx, 96, 'UPGRADED!', { fontFamily: 'Arial', fontSize: '34px', fontStyle: 'bold', color: '#ffd166', backgroundColor: '#000000cc', padding: { x: 22, y: 8 } }).setOrigin(0.5).setDepth(D + 10).setAlpha(0));
+          const bs = A(this.add.text(cx, 142, tierName(nx), { fontFamily: 'Arial', fontSize: '20px', fontStyle: 'bold', color: '#fff', backgroundColor: '#000000cc', padding: { x: 14, y: 5 } }).setOrigin(0.5).setDepth(D + 10).setAlpha(0));
+          this.tweens.add({ targets: [bn, bs], alpha: 1, duration: 400 });
         });
-        this.time.delayedCall(3100, () => { fx.forEach(o => { if (o && o.destroy) o.destroy(); }); this.upBusy = false; });
+        this.time.delayedCall(2600, () => { fx.forEach(o => { if (o && o.destroy) o.destroy(); }); this.upBusy = false; if (this.hm === m) this.showHome(); });
       });
     });
   }
@@ -1728,8 +1551,7 @@ class Main extends Phaser.Scene {
       this.recordResult(this.rules.winner === 0);
       const rs = this.settle(this.rules.winner === 0);
       const why = res.reason ? ' (' + res.reason + ')' : '';
-      this.msgBase = who(this.rules.winner) + ' wins!' + why;
-      this.msg.setText(this.msgBase + '   ' + this.econText(rs.prize, rs.d, false));
+      this.msg.setText(who(this.rules.winner) + ' wins!' + why + '   ' + (rs.prize ? '+' + fmtN(rs.prize) + ' coins   ' : 'Entry lost   ') + (rs.d >= 0 ? '+' : '') + rs.d + ' 🏆   (gear > New game)');
       this.refreshHud(); return;
     }
     let text;
@@ -2340,18 +2162,41 @@ class Main extends Phaser.Scene {
     this.gearG = this.add.graphics().setDepth(12);
     this.menuG = this.add.graphics().setDepth(20);
     const f = { fontFamily: 'Arial', fontSize: '19px', color: '#e7f3ea' };
-    this.menuT = [0, 1, 2].map(i => this.add.text(MENU.x + 18, MENU.y + 8 + i * MENU.rowH + MENU.rowH / 2, '', f).setOrigin(0, 0.5).setDepth(21).setVisible(false));
+    this.menuT = [0, 1, 2, 3, 4].map(i => this.add.text(MENU.x + 18, MENU.y + 8 + i * MENU.rowH + MENU.rowH / 2, '', f).setOrigin(0, 0.5).setDepth(21).setVisible(false));
     this.drawMenu();
   }
   toggleMenu() { this.menuOpen = !this.menuOpen; this.drawMenu(); }
+  menuN() { return isAdmin() ? 5 : 3; }              // rows shown: sound, jaws, new game (+ reset, +test coins for the owner)
   menuTap(p) {
-    const inside = p.x >= MENU.x && p.x <= MENU.x + MENU.w && p.y >= MENU.y && p.y <= MENU.y + 16 + 3 * MENU.rowH;
-    if (!inside) { this.menuOpen = false; this.drawMenu(); return; }
+    const N = this.menuN();
+    const inside = p.x >= MENU.x && p.x <= MENU.x + MENU.w && p.y >= MENU.y && p.y <= MENU.y + 16 + N * MENU.rowH;
+    if (!inside) { this.menuOpen = false; this.resetArmed = false; this.drawMenu(); return; }
     const row = Math.floor((p.y - MENU.y - 8) / MENU.rowH);
+    if (row >= N) return;
     if (row === 0) { this.soundOn = !this.soundOn; try { localStorage.setItem('pool_sound', this.soundOn ? '1' : '0'); } catch (e) {} }
     else if (row === 1) this.toggleJaws();
-    else if (row === 2) { this.menuOpen = false; this.startGame(); }
+    else if (row === 2) { this.menuOpen = false; this.resetArmed = false; this.startGame(); }
+    else if (row === 4) {                                                                      // owner test button: +10,000 coins and +500 trophies per tap
+      const P = this.prof; P.coins += 10000; P.tr += 500; this.saveProf(); this.refreshProfT();
+      this.toast('Test: +10,000 coins  +500 trophies'); this.resetArmed = false; this.drawMenu(); return;
+    }
+    else if (row === 3) {                                                                      // two taps: the first arms it, the second does it
+      if (!this.resetArmed) { this.resetArmed = true; if (this._ra) this._ra.remove(false); this._ra = this.time.delayedCall(4000, () => { this.resetArmed = false; this.drawMenu(); }); }
+      else { this.resetArmed = false; this.menuOpen = false; this.resetProgress(); }
+    }
+    if (row !== 3) this.resetArmed = false;
     this.drawMenu();
+  }
+  /* wipes the saved progress (coins, trophies, wins/losses, opponent history) on this phone AND in Telegram CloudStorage, then goes back to the home screen */
+  resetProgress() {
+    this.inGame = false; this.botJob = null;
+    try { ['pool_profile', 'pool_stats', 'pool_room'].forEach(k => localStorage.removeItem(k)); } catch (e) {}
+    this.prof = profDefault(); this.stats = { w: 0, l: 0, streak: 0, last: '', lastP: -1 };
+    this.room = 0;
+    this.saveProf();                                 // writes the fresh profile to the phone and to the cloud copy (so the old cloud data cannot come back)
+    this.saveStats(); this.refreshProfT();
+    this.startGame();
+    this.toast('Progress reset');
   }
   drawMenu() {
     const g = this.gearG; g.clear();
@@ -2364,16 +2209,20 @@ class Main extends Phaser.Scene {
     }
     g.fillStyle(0x16241c, 1); g.fillCircle(x, y, 3.6);
     const m = this.menuG; m.clear();
-    this.menuT.forEach(t => t.setVisible(open));
+    const N = this.menuN(); this.menuT.forEach((t, i) => t.setVisible(open && i < N));
     if (!open) return;
-    const h = 16 + 3 * MENU.rowH;
+    const h = 16 + N * MENU.rowH;
     m.fillStyle(0x16241c, 0.97); m.fillRoundedRect(MENU.x, MENU.y, MENU.w, h, 14);
     m.lineStyle(2, 0x2a3d31, 1); m.strokeRoundedRect(MENU.x, MENU.y, MENU.w, h, 14);
     m.lineStyle(1, 0x2a3d31, 1);
-    for (let i = 1; i < 3; i++) m.lineBetween(MENU.x + 12, MENU.y + 8 + i * MENU.rowH, MENU.x + MENU.w - 12, MENU.y + 8 + i * MENU.rowH);
+    for (let i = 1; i < N; i++) m.lineBetween(MENU.x + 12, MENU.y + 8 + i * MENU.rowH, MENU.x + MENU.w - 12, MENU.y + 8 + i * MENU.rowH);
     this.menuT[0].setText('Sound: ' + (this.soundOn ? 'ON' : 'OFF')).setColor(this.soundOn ? '#e7f3ea' : '#8fb39b');
     this.menuT[1].setText('Show jaws: ' + (this.showJaws ? 'ON' : 'OFF'));
     this.menuT[2].setText(this.inGame ? 'Resign & new game' : 'New game').setColor(this.inGame ? '#ff8a7a' : '#ffd166');
+    if (N > 3) {
+      this.menuT[3].setText(this.resetArmed ? 'Tap again: erase ALL' : 'Reset progress').setColor(this.resetArmed ? '#ff5a4a' : '#ff9b8a');
+      this.menuT[4].setText('Test: +10k 🪙  +500 🏆').setColor('#7fe3ff');
+    }
   }
 
   drawSpin() {                                    // drawn on the same graphics object, after the slider
